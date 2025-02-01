@@ -1,5 +1,6 @@
 // src-tauri/src/config.rs
 use serde::{Serialize, Deserialize};
+use std::env;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnConfig {
@@ -11,11 +12,20 @@ pub struct TurnConfig {
 
 impl Default for TurnConfig {
     fn default() -> Self {
+        let url = env::var("TURN_SERVER_URL")
+            .expect("TURN_SERVER_URL must be set in environment");
+        let username = env::var("TURN_USERNAME")
+            .expect("TURN_USERNAME must be set in environment");
+        let credential = env::var("TURN_CREDENTIAL")
+            .expect("TURN_CREDENTIAL must be set in environment");
+        let realm = env::var("TURN_REALM")
+            .expect("TURN_REALM must be set in environment");
+
         Self {
-            url: "turn:137.184.122.169:3478".to_string(),
-            username: "brokenhypocrite".to_string(),
-            credential: "formula1".to_string(),
-            realm: "137.184.122.169".to_string(),
+            url: if url.starts_with("turn:") { url } else { format!("turn:{}", url) },
+            username,
+            credential,
+            realm,
         }
     }
 }
