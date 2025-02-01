@@ -1,0 +1,60 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Rust
+/target/
+**/*.rs.bk
+# Removing Cargo.lock from ignore since this is a binary application
+
+# Tauri
+/src-tauri/target/
+/src-tauri/WixTools
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+.env.*
+
+# Debug symbols
+*.pdb
+
+# Platform-specific build artifacts
+*.exe
+*.msi
+*.dmg
+*.app
+*.deb
+*.AppImage
+# Exception for release builds
+!/src-tauri/target/release/*.exe
+!/src-tauri/target/release/*.msi
+!/src-tauri/target/release/*.dmg
+!/src-tauri/target/release/*.app
+!/src-tauri/target/release/*.deb
+!/src-tauri/target/release/*.AppImage
+
+# OS-specific
+.DS_Store
+Thumbs.db

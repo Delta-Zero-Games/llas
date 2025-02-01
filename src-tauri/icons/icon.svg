@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1"
+     xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 62.5 62.5"
+     preserveAspectRatio="xMidYMid meet">
+  <!-- Optional: a transparent square background -->
+  <rect width="62.5" height="62.5" fill="transparent"/>
+  <defs>
+    <style type="text/css">
+      .cls-1 { fill: #3cf281; }
+      .cls-2 { fill: #e44c55; }
+    </style>
+  </defs>
+  <!-- Translate the artwork downward by 9.3 to center it vertically -->
+  <g transform="translate(0,9.3)">
+    <path class="cls-1" d="M19.35,17.66v-7.03h9.95V0L14.6,7.4v7.3h0c-8.07,.03-14.6,6.55-14.6,14.6s6.56,14.6,14.65,14.6c6.43,0,11.89-4.13,13.86-9.87h-9.31l10.1-16.14,.14-.23h-10.09Z"/>
+    <path class="cls-2" d="M47.85,0c-6.71,0-12.37,4.5-14.1,10.63h10.45l-11,16.46-.04,.06h11.07v6.87h-11.02v9.87l14.7-7.4v-7.3h0c8.07-.03,14.6-6.55,14.6-14.6S55.94,0,47.85,0Z"/>
+  </g>
+</svg>
