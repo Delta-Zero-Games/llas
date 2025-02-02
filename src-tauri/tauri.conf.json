@@ -35,9 +35,12 @@
   },
   "plugins": {
     "opener": {
-      "permissions": {
-        "default": true
-      }
+      "capabilities": [
+        {
+          "id": "opener:allow-default-urls",
+          "allow": true
+        }
+      ]
     }
   }
 }
