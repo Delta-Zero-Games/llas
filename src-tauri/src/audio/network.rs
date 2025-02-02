@@ -4,7 +4,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, broadcast};
 use parking_lot::Mutex;
 use bytes::{BytesMut, BufMut};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use super::processor::AudioProcessor;
@@ -12,9 +12,6 @@ use crate::config::TurnConfig;
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::time::{Duration, Instant};
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 
 // Constants for TURN
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
@@ -416,7 +413,6 @@ fn hmac_key(username: &[u8], credential: &[u8], realm: &str) -> Vec<u8> {
 
 fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
     use hmac::{Hmac, Mac};
-    use crypto_mac::NewMac;
     use sha1::Sha1;
     let mut mac = Hmac::<Sha1>::new_from_slice(key).unwrap();
     mac.update(message);

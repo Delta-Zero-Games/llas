@@ -13,6 +13,8 @@ use crate::room::{RoomManager, Room, User};
 use crate::audio::{AudioProcessor, AudioNetwork};
 use crate::config::TurnConfig;
 use tokio::sync::mpsc;
+use futures_util::future::try_future::TryFutureExt;
+use parking_lot::Mutex;
 
 type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
 type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
@@ -126,13 +128,14 @@ async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8
         *processor_lock = Some(AudioProcessor::new(tx).map_err(|e| e.to_string())?);
     }
     // Extract a clone of the AudioProcessor to pass on.
-    let processor_instance = processor_lock
-        .as_ref()
-        .ok_or_else(|| "Processor not initialized".to_string())?
-        .clone();
+    let processor_arc = {
+        // Extract the current AudioProcessor from the Option.
+        let guard = processor.lock().await;
+        Arc::new(Mutex::new(guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()))
+    };
     // Setup streams
-    processor_instance.setup_output_stream().map_err(|e| e.to_string())?;
-    processor_instance.start_capture().map_err(|e| e.to_string())
+    processor_arc.lock().await.setup_output_stream().await.map_err(|e| e.to_string())?;
+    processor_arc.lock().await.start_capture().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -149,22 +152,13 @@ async fn start_streaming(
         manager.get_room_peers(&room_id)
     };
 
-    let processor_arc = {
-        // Extract the current AudioProcessor from the Option.
-        let guard = state.audio_processor.lock().await;
-        guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
-    };
-
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
         for peer_addr in peers {
             net.add_peer(peer_addr);
         }
-        // Since handle_incoming expects an Arc<Mutex<AudioProcessor>>,
-        // we wrap the cloned processor in a new Tokio mutex.
-        let proc_for_incoming = Arc::new(Mutex::new(processor_arc));
         net.start_streaming(rx).await;
-        net.handle_incoming(proc_for_incoming).await;
+        net.handle_incoming(processor_arc).await;
     }
     
     Ok(())
@@ -186,7 +180,7 @@ async fn set_input_device(
 ) -> Result<(), String> {
     let mut processor_lock = state.audio_processor.lock().await;
     if let Some(proc) = processor_lock.as_mut() {
-        proc.set_input_device(&device_id).map_err(|e| e.to_string())?;
+        proc.set_input_device(&device_id).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }

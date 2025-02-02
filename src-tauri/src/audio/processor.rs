@@ -3,7 +3,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus::{Encoder, Decoder, Channels};
 use tokio::sync::mpsc;
-use ringbuf::ring_buffer::{RingBuffer, DefaultRb};
+use ringbuf::{RingBuffer, HeapRb};
 use std::sync::Arc;
 use tokio::sync::Mutex; // We use Tokio's Mutex for async safety.
 use atomic_float::AtomicF32; // From the atomic_float crate
@@ -25,7 +25,7 @@ pub struct AudioProcessor {
     output_volume: Arc<AtomicF32>,
     is_muted: Arc<std::sync::atomic::AtomicBool>,
     // Specify both generic parameters for the Producer.
-    pub output_producer: Option<Arc<Mutex<ringbuf::Producer<f32, DefaultRb<f32>>>>>,
+    pub output_producer: Option<Arc<Mutex<ringbuf::Producer<f32, Arc<HeapRb<f32>>>>>>,
 }
 
 // In our Clone implementation, we don’t clone the output_producer.
@@ -64,7 +64,7 @@ impl AudioProcessor {
         })
     }
 
-    pub fn setup_output_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn setup_output_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -76,7 +76,7 @@ impl AudioProcessor {
         };
 
         let ring_size = 4800; // e.g. 100ms of audio buffer
-        let (producer, consumer) = RingBuffer::<f32, DefaultRb<f32>>::new(ring_size).split();
+        let (producer, consumer) = RingBuffer::<f32, Arc<HeapRb<f32>>>::new(ring_size).split();
         let producer = Arc::new(Mutex::new(producer));
         self.output_producer = Some(producer.clone());
 
@@ -101,7 +101,9 @@ impl AudioProcessor {
             None,
         )?;
         output_stream.play()?;
-        *self.output_stream.lock().blocking_lock() = StreamWrapper(Some(output_stream));
+        let mut stream = self.output_stream.lock().await;
+        let stream_clone = stream.clone();
+        *stream = StreamWrapper(Some(stream_clone));
         Ok(())
     }
 
@@ -129,7 +131,7 @@ impl AudioProcessor {
         self.is_muted.store(muted, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn start_capture(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start_capture(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -154,20 +156,28 @@ impl AudioProcessor {
             None,
         )?;
         stream.play()?;
-        *self.input_stream.lock().blocking_lock() = StreamWrapper(Some(stream));
+        let mut stream = self.input_stream.lock().await;
+        let stream_clone = stream.clone();
+        *stream = StreamWrapper(Some(stream_clone));
         Ok(())
     }
 
-    pub fn cleanup(&mut self) {
-        *self.input_stream.lock().blocking_lock() = StreamWrapper(None);
-        *self.output_stream.lock().blocking_lock() = StreamWrapper(None);
+    pub async fn cleanup(&mut self) {
+        let mut stream = self.input_stream.lock().await;
+        *stream = StreamWrapper(None);
+        let mut stream = self.output_stream.lock().await;
+        *stream = StreamWrapper(None);
         self.output_producer = None;
     }
 
-    pub fn set_input_device(&mut self, _device_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // For simplicity, stop and restart capture.
-        *self.input_stream.lock().blocking_lock() = StreamWrapper(None);
-        self.start_capture()
+    pub async fn set_input_device(&mut self, _device_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Drop the current stream first
+        {
+            let mut stream = self.input_stream.lock().await;
+            *stream = StreamWrapper(None);
+        } // stream lock is dropped here
+        // Now we can start capture
+        self.start_capture().await
     }
 
     pub fn set_input_volume(&self, volume: f32) -> Result<(), Box<dyn std::error::Error>> {
