@@ -1,33 +1,44 @@
 // src-tauri/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod room;
+mod config;
+mod audio;
+
 use tauri::State;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex; // Use async mutex from tokio!
 use uuid::Uuid;
 use crate::room::{RoomManager, Room, User};
 use crate::audio::{AudioProcessor, AudioNetwork};
 use crate::config::TurnConfig;
 use tokio::sync::mpsc;
 
-// Define AppState to hold our shared state
+type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
+type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
+
 pub struct AppState {
     room_manager: Arc<Mutex<RoomManager>>,
-    audio_processor: Arc<Mutex<Option<AudioProcessor>>>,
-    network: Arc<Mutex<Option<AudioNetwork>>>,
+    audio_processor: SafeAudioProcessor,
+    network: SafeAudioNetwork,
 }
 
-// User management commands
+impl AppState {
+    fn new() -> Self {
+        Self {
+            room_manager: Arc::new(Mutex::new(RoomManager::new())),
+            audio_processor: Arc::new(Mutex::new(None)),
+            network: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
 #[tauri::command]
-async fn add_user(
-    state: State<'_, AppState>,
-    name: String,
-) -> Result<User, String> {
+async fn add_user(state: State<'_, AppState>, name: String) -> Result<User, String> {
     let mut manager = state.room_manager.lock().await;
     Ok(manager.add_user(name))
 }
 
-// Room management commands
 #[tauri::command]
 async fn create_room(
     state: State<'_, AppState>,
@@ -39,45 +50,56 @@ async fn create_room(
     Ok(manager.create_room(name, user_id))
 }
 
+async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
+    let turn_config = TurnConfig::default();
+    let mut network_lock = network.lock().await;
+    if network_lock.is_none() {
+        let new_network = AudioNetwork::new("0.0.0.0:0", turn_config)
+            .await
+            .map_err(|e| e.to_string())?;
+        *network_lock = Some(new_network);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn join_room(
     state: State<'_, AppState>,
     room_id: String,
     user_id: String,
 ) -> Result<Room, String> {
-    let turn_config = TurnConfig::default();
-    let mut manager = state.room_manager.lock().await;
-    let mut network = state.network.lock().await;
-    
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
+    
+    // Initialize network
+    init_network(&state.network).await?;
+    
+    let peer_addr = {
+        let network = state.network.lock().await;
+        network.as_ref()
+            .ok_or_else(|| "Network not initialized".to_string())?
+            .get_local_addr()
+            .map_err(|e| e.to_string())?
+    };
 
-    // Initialize network if needed
-    if network.is_none() {
-        *network = Some(AudioNetwork::new("0.0.0.0:0", turn_config).await
-            .map_err(|e| e.to_string())?);
-    }
-
-    // Get allocated address from TURN server
-    if let Some(net) = network.as_mut() {
-        let peer_addr = net.get_local_addr()
-            .map_err(|e| e.to_string())?;
-        
+    {
+        let mut manager = state.room_manager.lock().await;
         manager.add_peer_address(user_id, peer_addr)?;
-    }
-
-    let room = manager.join_room(room_id, user_id)?;
-
-    // Add existing participants as peers
-    if let Some(net) = network.as_mut() {
-        for participant in &room.participants {
-            if let Some(peer_addr) = participant.peer_addr {
-                net.add_peer(peer_addr);
+        let room = manager.join_room(room_id, user_id)?;
+        
+        // Add peers to network
+        {
+            let mut network = state.network.lock().await;
+            if let Some(net) = network.as_mut() {
+                for participant in &room.participants {
+                    if let Some(participant_addr) = participant.peer_addr {
+                        net.add_peer(participant_addr);
+                    }
+                }
             }
         }
+        Ok(room)
     }
-
-    Ok(room)
 }
 
 #[tauri::command]
@@ -98,45 +120,51 @@ async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<Room>, String> {
     Ok(manager.list_rooms())
 }
 
-// Audio commands
+async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8>>) -> Result<(), String> {
+    let mut processor_lock = processor.lock().await;
+    if processor_lock.is_none() {
+        *processor_lock = Some(AudioProcessor::new(tx).map_err(|e| e.to_string())?);
+    }
+    // Extract a clone of the AudioProcessor to pass on.
+    let processor_instance = processor_lock
+        .as_ref()
+        .ok_or_else(|| "Processor not initialized".to_string())?
+        .clone();
+    // Setup streams
+    processor_instance.setup_output_stream().map_err(|e| e.to_string())?;
+    processor_instance.start_capture().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn start_streaming(
     state: State<'_, AppState>,
     room_id: String
 ) -> Result<(), String> {
     let (tx, rx) = mpsc::channel(32);
+    setup_processor(&state.audio_processor, tx).await?;
     
-    // Initialize audio processor
-    let processor = {
-        let mut processor_lock = state.audio_processor.lock().await;
-        if processor_lock.is_none() {
-            *processor_lock = Some(AudioProcessor::new(tx)?);
-        }
-        
-        let processor = processor_lock.as_mut().unwrap();
-        processor.setup_output_stream()?;
-        processor.start_capture()?;
-        
-        Arc::new(Mutex::new(processor.clone()))
-    };
-
-    // Get room information and peers
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let peers = {
         let manager = state.room_manager.lock().await;
         manager.get_room_peers(&room_id)
     };
 
-    // Start network streaming
+    let processor_arc = {
+        // Extract the current AudioProcessor from the Option.
+        let guard = state.audio_processor.lock().await;
+        guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
+    };
+
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
-        // Add all peers from room
         for peer_addr in peers {
             net.add_peer(peer_addr);
         }
-        
+        // Since handle_incoming expects an Arc<Mutex<AudioProcessor>>,
+        // we wrap the cloned processor in a new Tokio mutex.
+        let proc_for_incoming = Arc::new(Mutex::new(processor_arc));
         net.start_streaming(rx).await;
-        net.handle_incoming(processor).await;
+        net.handle_incoming(proc_for_incoming).await;
     }
     
     Ok(())
@@ -146,10 +174,8 @@ async fn start_streaming(
 async fn stop_streaming(state: State<'_, AppState>) -> Result<(), String> {
     let mut network = state.network.lock().await;
     let mut processor = state.audio_processor.lock().await;
-    
     *network = None;
     *processor = None;
-    
     Ok(())
 }
 
@@ -158,8 +184,8 @@ async fn set_input_device(
     state: State<'_, AppState>,
     device_id: String
 ) -> Result<(), String> {
-    let mut processor = state.audio_processor.lock().await;
-    if let Some(proc) = processor.as_mut() {
+    let mut processor_lock = state.audio_processor.lock().await;
+    if let Some(proc) = processor_lock.as_mut() {
         proc.set_input_device(&device_id).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -170,8 +196,8 @@ async fn set_input_volume(
     state: State<'_, AppState>,
     volume: f32
 ) -> Result<(), String> {
-    let mut processor = state.audio_processor.lock().await;
-    if let Some(proc) = processor.as_mut() {
+    let mut processor_lock = state.audio_processor.lock().await;
+    if let Some(proc) = processor_lock.as_mut() {
         proc.set_input_volume(volume).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -182,9 +208,9 @@ async fn set_muted(
     state: State<'_, AppState>,
     muted: bool
 ) -> Result<(), String> {
-    let mut processor = state.audio_processor.lock().await;
-    if let Some(proc) = processor.as_mut() {
-        proc.set_muted(muted).map_err(|e| e.to_string())?;
+    let mut processor_lock = state.audio_processor.lock().await;
+    if let Some(proc) = processor_lock.as_mut() {
+        proc.set_muted(muted);
     }
     Ok(())
 }
@@ -192,23 +218,19 @@ async fn set_muted(
 #[tauri::command]
 async fn set_user_volume(
     state: State<'_, AppState>,
-    user_id: String,
+    _user_id: String, // unused for now
     volume: f32
 ) -> Result<(), String> {
-    let mut processor = state.audio_processor.lock().await;
-    if let Some(proc) = processor.as_mut() {
-        proc.set_output_volume(volume).map_err(|e| e.to_string())?;
+    let mut processor_lock = state.audio_processor.lock().await;
+    if let Some(proc) = processor_lock.as_mut() {
+        proc.set_output_volume(volume);
     }
     Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
-        .manage(AppState {
-            room_manager: Arc::new(Mutex::new(RoomManager::new())),
-            audio_processor: Arc::new(Mutex::new(None)),
-            network: Arc::new(Mutex::new(None)),
-        })
+        .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             add_user,
             create_room,

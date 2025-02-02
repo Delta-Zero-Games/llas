@@ -2,7 +2,6 @@
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
@@ -47,46 +46,32 @@ impl RoomManager {
             participants: Vec::new(),
             created_at: Utc::now(),
         };
-
         self.rooms.insert(room.id, room.clone());
         room
     }
 
     pub fn join_room(&mut self, room_id: Uuid, user_id: Uuid) -> Result<Room, String> {
-        let room = self.rooms.get_mut(&room_id)
-            .ok_or("Room not found")?;
-        
-        let user = self.users.get(&user_id)
-            .ok_or("User not found")?;
-
+        let room = self.rooms.get_mut(&room_id).ok_or("Room not found")?;
+        let user = self.users.get(&user_id).ok_or("User not found")?;
         if !room.participants.iter().any(|p| p.id == user_id) {
             room.participants.push(user.clone());
         }
-
         Ok(room.clone())
     }
 
     pub fn leave_room(&mut self, room_id: Uuid, user_id: Uuid) -> Result<(), String> {
-        let room = self.rooms.get_mut(&room_id)
-            .ok_or("Room not found")?;
-
+        let room = self.rooms.get_mut(&room_id).ok_or("Room not found")?;
         room.participants.retain(|p| p.id != user_id);
-
-        // Clean up peer mappings when user leaves
         if let Some(user) = self.users.get(&user_id) {
             if let Some(addr) = user.peer_addr {
                 self.peer_mappings.remove(&addr);
             }
         }
-
-        // If room is empty and it's not the creator, remove the room
         if room.participants.is_empty() && room.creator_id != user_id {
             self.rooms.remove(&room_id);
         } else if room.creator_id == user_id && !room.participants.is_empty() {
-            // Transfer ownership to the next participant
             room.creator_id = room.participants[0].id;
         }
-
         Ok(())
     }
 
@@ -94,14 +79,11 @@ impl RoomManager {
         self.rooms.values().cloned().collect()
     }
 
-    // New methods for peer handling
     pub fn add_peer_address(&mut self, user_id: Uuid, addr: SocketAddr) -> Result<(), String> {
         if let Some(user) = self.users.get_mut(&user_id) {
-            // Remove old peer mapping if it exists
             if let Some(old_addr) = user.peer_addr {
                 self.peer_mappings.remove(&old_addr);
             }
-            
             user.peer_addr = Some(addr);
             self.peer_mappings.insert(addr, user_id);
             Ok(())
@@ -112,22 +94,12 @@ impl RoomManager {
 
     pub fn get_room_peers(&self, room_id: &Uuid) -> Vec<SocketAddr> {
         if let Some(room) = self.rooms.get(room_id) {
-            room.participants
-                .iter()
-                .filter_map(|user| user.peer_addr)
-                .collect()
+            room.participants.iter().filter_map(|user| user.peer_addr).collect()
         } else {
             Vec::new()
         }
     }
-
-    pub fn get_user_by_peer(&self, addr: &SocketAddr) -> Option<&User> {
-        self.peer_mappings
-            .get(addr)
-            .and_then(|user_id| self.users.get(user_id))
-    }
-
-    // Add user to system
+    
     pub fn add_user(&mut self, name: String) -> User {
         let user = User {
             id: Uuid::new_v4(),
@@ -136,7 +108,6 @@ impl RoomManager {
             is_deafened: false,
             peer_addr: None,
         };
-        
         self.users.insert(user.id, user.clone());
         user
     }
