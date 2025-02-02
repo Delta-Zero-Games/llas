@@ -7,14 +7,14 @@ mod audio;
 
 use tauri::State;
 use std::sync::Arc;
-use tokio::sync::Mutex; // Use async mutex from tokio!
+use tokio::sync::Mutex; 
 use uuid::Uuid;
 use crate::room::{RoomManager, Room, User};
 use crate::audio::{AudioProcessor, AudioNetwork};
 use crate::config::TurnConfig;
 use tokio::sync::mpsc;
 use futures_util::future::try_future::TryFutureExt;
-use parking_lot::Mutex;
+use parking_lot::Mutex as PLMutex;
 
 type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
 type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
@@ -127,15 +127,13 @@ async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8
     if processor_lock.is_none() {
         *processor_lock = Some(AudioProcessor::new(tx).map_err(|e| e.to_string())?);
     }
-    // Extract a clone of the AudioProcessor to pass on.
-    let processor_arc = {
-        // Extract the current AudioProcessor from the Option.
-        let guard = processor.lock().await;
-        Arc::new(Mutex::new(guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()))
-    };
+
+    // Get a reference to the processor
+    let processor_ref = processor_lock.as_mut().ok_or_else(|| "Processor not initialized".to_string())?;
+    
     // Setup streams
-    processor_arc.lock().await.setup_output_stream().await.map_err(|e| e.to_string())?;
-    processor_arc.lock().await.start_capture().await.map_err(|e| e.to_string())
+    processor_ref.setup_output_stream().await.map_err(|e| e.to_string())?;
+    processor_ref.start_capture().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -158,7 +156,16 @@ async fn start_streaming(
             net.add_peer(peer_addr);
         }
         net.start_streaming(rx).await;
-        net.handle_incoming(processor_arc).await;
+        
+        // Get the processor reference
+        let processor = {
+            let guard = state.audio_processor.lock().await;
+            guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
+        };
+        
+        // Create a new Arc<Mutex<AudioProcessor>> for the network
+        let network_processor = Arc::new(PLMutex::new(processor));
+        net.handle_incoming(network_processor).await;
     }
     
     Ok(())

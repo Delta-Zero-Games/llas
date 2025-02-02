@@ -1,9 +1,9 @@
 // src-tauri/src/audio/processor.rs
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 use opus::{Encoder, Decoder, Channels};
 use tokio::sync::mpsc;
-use ringbuf::{RingBuffer, HeapRb};
+use ringbuf::{HeapRb, Producer};
 use std::sync::Arc;
 use tokio::sync::Mutex; // We use Tokio's Mutex for async safety.
 use atomic_float::AtomicF32; // From the atomic_float crate
@@ -25,7 +25,7 @@ pub struct AudioProcessor {
     output_volume: Arc<AtomicF32>,
     is_muted: Arc<std::sync::atomic::AtomicBool>,
     // Specify both generic parameters for the Producer.
-    pub output_producer: Option<Arc<Mutex<ringbuf::Producer<f32, Arc<HeapRb<f32>>>>>>,
+    pub output_producer: Option<Arc<Mutex<Producer<f32, Arc<HeapRb<f32>>>>>>,
 }
 
 // In our Clone implementation, we don’t clone the output_producer.
@@ -76,7 +76,7 @@ impl AudioProcessor {
         };
 
         let ring_size = 4800; // e.g. 100ms of audio buffer
-        let (producer, consumer) = RingBuffer::<f32, Arc<HeapRb<f32>>>::new(ring_size).split();
+        let (producer, mut consumer) = HeapRb::<f32>::new(ring_size).split();
         let producer = Arc::new(Mutex::new(producer));
         self.output_producer = Some(producer.clone());
 
@@ -100,10 +100,8 @@ impl AudioProcessor {
             |err| eprintln!("Output error: {}", err),
             None,
         )?;
-        output_stream.play()?;
-        let mut stream = self.output_stream.lock().await;
-        let stream_clone = stream.clone();
-        *stream = StreamWrapper(Some(stream_clone));
+        let output_stream_handle = output_stream;
+        *self.output_stream.lock().await = StreamWrapper(Some(output_stream_handle));
         Ok(())
     }
 
@@ -155,10 +153,8 @@ impl AudioProcessor {
             |err| eprintln!("Audio capture error: {}", err),
             None,
         )?;
-        stream.play()?;
-        let mut stream = self.input_stream.lock().await;
-        let stream_clone = stream.clone();
-        *stream = StreamWrapper(Some(stream_clone));
+        let stream_handle = stream;
+        *self.input_stream.lock().await = StreamWrapper(Some(stream_handle));
         Ok(())
     }
 
