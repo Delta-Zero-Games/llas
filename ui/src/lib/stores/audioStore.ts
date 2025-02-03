@@ -31,77 +31,57 @@ function createAudioStore() {
 
   return {
     subscribe,
+    
     startAudio: async (serverAddr: string) => {
       try {
         await invoke('start_audio', { serverAddr });
-        update(state => ({ ...state, isConnected: true }));
+        update(state => ({ ...state, isConnected: true, error: null }));
       } catch (err) {
-        update(state => ({ 
-          ...state, 
-          error: err instanceof Error ? err.message : 'Failed to start audio'
-        }));
+        update(state => ({ ...state, error: err instanceof Error ? err.message : 'Failed to start audio' }));
       }
     },
-    stopAudio: async () => {
-      try {
-        await invoke('stop_audio');
-        update(state => ({ ...state, isConnected: false }));
-      } catch (err) {
-        update(state => ({ 
-          ...state, 
-          error: err instanceof Error ? err.message : 'Failed to stop audio'
-        }));
-      }
+
+    setDevices: (input: MediaDeviceInfo | null, output: MediaDeviceInfo | null) => {
+      update(state => ({
+        ...state,
+        inputDevice: input || state.inputDevice,
+        outputDevice: output || state.outputDevice
+      }));
     },
-    setDevices: async (input: MediaDeviceInfo | null, output: MediaDeviceInfo | null) => {
-      try {
-        if (input) {
-          await invoke('set_input_device', { deviceId: input.deviceId });
-        }
-        update(state => ({ ...state, inputDevice: input, outputDevice: output }));
-      } catch (err) {
-        update(state => ({ 
-          ...state, 
-          error: err instanceof Error ? err.message : 'Failed to set devices'
-        }));
-      }
+
+    setVolume: (type: 'input' | 'output', volume: number) => {
+      update(state => ({
+        ...state,
+        [type === 'input' ? 'inputVolume' : 'outputVolume']: volume
+      }));
     },
-    setVolume: async (type: 'input' | 'output', value: number) => {
-      try {
-        await invoke(`set_${type}_volume`, { volume: value });
-        update(state => ({
-          ...state,
-          [type === 'input' ? 'inputVolume' : 'outputVolume']: value
-        }));
-      } catch (err) {
-        update(state => ({ 
-          ...state, 
-          error: err instanceof Error ? err.message : 'Failed to set volume'
-        }));
-      }
-    },
-    toggleMute: async () => {
-      update(state => {
-        const newMuted = !state.isMuted;
-        invoke('set_muted', { muted: newMuted });
-        return { ...state, isMuted: newMuted };
-      });
-    },
+
     setUserVolume: async (userId: string, volume: number) => {
-        try {
-            await invoke('set_user_volume', { userId, volume });
-            update(state => ({
-            ...state,
-            // Could store user volumes here if needed
-            }));
-        } catch (err) {
-            update(state => ({ 
-            ...state, 
-            error: err instanceof Error ? err.message : 'Failed to set user volume'
-            }));
-        }
+      try {
+        await invoke('set_user_volume', { userId, volume });
+      } catch (err) {
+        update(state => ({ 
+          ...state, 
+          error: err instanceof Error ? err.message : 'Failed to set user volume'
+        }));
+      }
     },
-    clearError: () => update(state => ({ ...state, error: null }))
+
+    toggleMute: () => {
+      update(state => ({ ...state, isMuted: !state.isMuted }));
+    },
+
+    setDeafened: (deafened: boolean) => {
+      update(state => ({ ...state, isDeafened: deafened }));
+    },
+
+    setInputLevel: (level: number) => {
+      update(state => ({ ...state, inputLevel: level }));
+    },
+
+    clearError: () => {
+      update(state => ({ ...state, error: null }));
+    }
   };
 }
 

@@ -7,8 +7,9 @@
 
 <div class="space-y-4 text-white">
     <div class="flex flex-col gap-2">
-        <label class="text-sm text-gray-300">Volume</label>
+        <label for="volume-control" class="text-sm text-gray-300">Volume</label>
         <input 
+        id="volume-control"
         type="range" 
         bind:value={volume} 
         min="0" 

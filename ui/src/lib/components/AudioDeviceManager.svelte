@@ -1,5 +1,4 @@
 <!-- ui/src/lib/components/AudioDeviceManager.svelte -->
-<!-- ui/src/lib/components/AudioDeviceManager.svelte -->
 <script lang="ts">
     import { onMount } from 'svelte';
     import { audioStore } from '../stores/audioStore';
@@ -7,9 +6,15 @@
   
     let stream: MediaStream | null = null;
     let error: string | null = null;
+    let selectedInputId: string | null = null;
+    let selectedOutputId: string | null = null;
+    let inputDevices: MediaDeviceInfo[] = [];
+    let outputDevices: MediaDeviceInfo[] = [];
   
-    async function handleInputChange(deviceId: string) {
+    async function handleInputChange(event: Event) {
       try {
+        const deviceId = (event.target as HTMLSelectElement).value;
+        
         if (stream) {
           stream.getTracks().forEach(track => track.stop());
         }
@@ -36,9 +41,15 @@
         await navigator.mediaDevices.getUserMedia({ audio: true });
         const devices = await navigator.mediaDevices.enumerateDevices();
         
+        // Filter audio devices
+        inputDevices = devices.filter(device => device.kind === 'audioinput');
+        outputDevices = devices.filter(device => device.kind === 'audiooutput');
+        
         // Set up device change listener
-        navigator.mediaDevices.addEventListener('devicechange', () => {
-          // Handle device changes
+        navigator.mediaDevices.addEventListener('devicechange', async () => {
+          const updatedDevices = await navigator.mediaDevices.enumerateDevices();
+          inputDevices = updatedDevices.filter(device => device.kind === 'audioinput');
+          outputDevices = updatedDevices.filter(device => device.kind === 'audiooutput');
         });
         
       } catch (err) {
@@ -63,7 +74,7 @@
             on:change={handleInputChange}
         >
             {#each inputDevices as device}
-                <option value={device.id}>{device.name}</option>
+                <option value={device.deviceId}>{device.label}</option>
             {/each}
         </select>
     </div>
@@ -75,12 +86,12 @@
             class="w-full p-2 bg-gray-700 rounded"
             bind:value={selectedOutputId}
             on:change={() => {
-                const selectedOutput = outputDevices.find(d => d.id === selectedOutputId);
+                const selectedOutput = outputDevices.find(d => d.deviceId === selectedOutputId);
                 audioStore.setDevices(null, selectedOutput || null);
             }}
         >
             {#each outputDevices as device}
-                <option value={device.id}>{device.name}</option>
+                <option value={device.deviceId}>{device.label}</option>
             {/each}
         </select>
     </div>
@@ -115,7 +126,7 @@
         
         <button 
             class={`flex-1 py-2 px-4 rounded-lg transition-colors ${$audioStore.isDeafened ? 'bg-red-500' : 'bg-gray-700'}`}
-            on:click={() => audioStore.toggleDeafen()}
+            on:click={() => audioStore.setDeafened(!$audioStore.isDeafened)}
         >
             {$audioStore.isDeafened ? 'Undeafen' : 'Deafen'}
         </button>
