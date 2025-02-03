@@ -21,19 +21,8 @@ function createUserStore() {
 
         setUser: async (name: string) => {
             try {
-                const userId = crypto.randomUUID();
-                const user: User = {
-                    id: userId,
-                    name,
-                    isOnline: true,
-                    status: 'online',
-                    is_muted: false,
-                    is_deafened: false,
-                    volume: 1
-                };
-
-                // Notify the backend about the new user
-                await invoke('set_user', { user });
+                // Call the backend to add the user
+                const user = await invoke<User>('add_user', { name });
 
                 update(state => ({
                     ...state,
@@ -41,109 +30,63 @@ function createUserStore() {
                     error: null
                 }));
             } catch (err) {
+                console.error('Failed to set user:', err);
                 update(state => ({
                     ...state,
                     error: err instanceof Error ? err.message : 'Failed to set user'
                 }));
-            }
-        },
-
-        updateStatus: async (status: User['status']) => {
-            try {
-                const currentState = get(userStore);
-                if (!currentState.currentUser) {
-                    throw new Error('No user is currently set');
-                }
-
-                const updatedUser = {
-                    ...currentState.currentUser,
-                    status,
-                    lastSeen: status === 'offline' ? new Date() : undefined
-                };
-
-                // Notify the backend about the status change
-                await invoke('update_user_status', { 
-                    userId: updatedUser.id, 
-                    status 
-                });
-
-                update(state => ({
-                    ...state,
-                    currentUser: updatedUser,
-                    error: null
-                }));
-            } catch (err) {
-                update(state => ({
-                    ...state,
-                    error: err instanceof Error ? err.message : 'Failed to update status'
-                }));
+                throw err; // Re-throw to let the component handle the error
             }
         },
 
         updateName: async (name: string) => {
+            const currentUser = get(userStore).currentUser;
+            if (!currentUser) return;
+
+            update(state => ({
+                ...state,
+                currentUser: state.currentUser ? { ...state.currentUser, name } : null
+            }));
+        },
+
+        setMuted: async (is_muted: boolean) => {
+            const currentUser = get(userStore).currentUser;
+            if (!currentUser) return;
+
             try {
-                const currentState = get(userStore);
-                if (!currentState.currentUser) {
-                    throw new Error('No user is currently set');
-                }
-
-                const updatedUser = {
-                    ...currentState.currentUser,
-                    name
-                };
-
-                // Notify the backend about the name change
-                await invoke('update_user_name', { 
-                    userId: updatedUser.id, 
-                    name 
-                });
-
+                await invoke('set_muted', { muted: is_muted });
                 update(state => ({
                     ...state,
-                    currentUser: updatedUser,
-                    error: null
+                    currentUser: state.currentUser ? { ...state.currentUser, is_muted } : null
                 }));
             } catch (err) {
-                update(state => ({
-                    ...state,
-                    error: err instanceof Error ? err.message : 'Failed to update name'
-                }));
+                console.error('Failed to set mute state:', err);
             }
         },
 
-        updateAudioState: async (changes: { is_muted?: boolean; is_deafened?: boolean }) => {
-            try {
-                const currentState = get(userStore);
-                if (!currentState.currentUser) {
-                    throw new Error('No user is currently set');
-                }
+        setDeafened: async (is_deafened: boolean) => {
+            const currentUser = get(userStore).currentUser;
+            if (!currentUser) return;
 
-                const updatedUser = {
-                    ...currentState.currentUser,
-                    ...changes
-                };
-
-                // Notify the backend about the audio state change
-                await invoke('update_user_audio_state', { 
-                    userId: updatedUser.id, 
-                    ...changes
-                });
-
-                update(state => ({
-                    ...state,
-                    currentUser: updatedUser,
-                    error: null
-                }));
-            } catch (err) {
-                update(state => ({
-                    ...state,
-                    error: err instanceof Error ? err.message : 'Failed to update audio state'
-                }));
-            }
+            update(state => ({
+                ...state,
+                currentUser: state.currentUser ? { ...state.currentUser, is_deafened } : null
+            }));
         },
 
-        clearError: () => {
-            update(state => ({ ...state, error: null }));
+        setVolume: async (volume: number) => {
+            const currentUser = get(userStore).currentUser;
+            if (!currentUser) return;
+
+            try {
+                await invoke('set_user_volume', { volume });
+                update(state => ({
+                    ...state,
+                    currentUser: state.currentUser ? { ...state.currentUser, volume } : null
+                }));
+            } catch (err) {
+                console.error('Failed to set volume:', err);
+            }
         }
     };
 }
