@@ -13,8 +13,8 @@ export default defineConfig({
 
   // This ensures compatibility with Tauri
   server: {
-    port: 1420,
     strictPort: true,
+    port: parseInt(process.env.VITE_PORT || '1420'),
   },
 
   // Ensure the build output goes to the correct location

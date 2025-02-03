@@ -7,6 +7,7 @@
   import { audioStore } from './lib/stores/audioStore';
   import { roomStore } from './lib/stores/roomStore';
   import { userStore } from './lib/stores/userStore';
+  import NetworkMonitor from './lib/components/NetworkMonitor.svelte';
 </script>
 
 <main class="h-screen flex flex-col bg-zinc-900">
@@ -65,6 +66,12 @@
     <div class="w-80 flex-shrink-0">
       <AudioDeviceManager />
     </div>
+  </div>
+  <!-- Network Monitor -->
+  <div class="container mx-auto px-4 py-3">
+  {#if $userStore.currentUser && $roomStore.currentRoom}
+    <NetworkMonitor />
+  {/if}
   </div>
 </main>
 
