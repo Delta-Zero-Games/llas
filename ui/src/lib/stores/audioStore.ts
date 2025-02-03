@@ -1,6 +1,6 @@
 // ui/src/lib/stores/audioStore.ts
 import { writable } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface AudioState {
   inputDevice: MediaDeviceInfo | null;

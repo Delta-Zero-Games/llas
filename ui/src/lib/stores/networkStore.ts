@@ -1,7 +1,7 @@
 // ui/src/lib/stores/networkStore.ts
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import type { PeerConnection } from '../types/network';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface NetworkStats {
   latency: number;

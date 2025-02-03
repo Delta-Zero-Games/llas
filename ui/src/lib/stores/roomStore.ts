@@ -1,6 +1,6 @@
 // ui/src/lib/stores/roomStore.ts
 import { writable } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface Room {
   id: string;
