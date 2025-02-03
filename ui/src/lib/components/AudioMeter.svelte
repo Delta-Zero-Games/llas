@@ -48,5 +48,5 @@
     <div 
       class="h-full bg-blue-500 transition-all duration-100"
       style="width: {meterHeight}%"
-    />
+    ></div>
   </div>

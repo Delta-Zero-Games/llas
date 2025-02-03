@@ -2,6 +2,7 @@
 import { writable, get } from 'svelte/store';
 import type { PeerConnection } from '../types/network';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 export interface NetworkStats {
   latency: number;
@@ -65,19 +66,25 @@ function createNetworkStore() {
 
     startMonitoring: async () => {
       try {
-        // Listen for network stats from Rust
-        await invoke('subscribe_to_network_stats', {}, (event: any) => {
+        // Start the network stats monitoring on the Rust side
+        await invoke('subscribe_to_network_stats');
+        
+        // Listen for network stats events
+        const unlisten = await listen<any>('network-stats', (event) => {
           update(state => ({
             ...state,
             stats: {
-              latency: event.latency,
-              packetLoss: event.packet_loss,
-              jitter: event.jitter,
-              bufferSize: event.buffer_size,
-              connectionQuality: event.connection_quality
+              latency: event.payload.latency,
+              packetLoss: event.payload.packet_loss,
+              jitter: event.payload.jitter,
+              bufferSize: event.payload.buffer_size,
+              connectionQuality: event.payload.connection_quality
             }
           }));
         });
+        
+        // Store the unlisten function for cleanup
+        return unlisten;
       } catch (err) {
         console.error('Failed to start network monitoring:', err);
         update(state => ({

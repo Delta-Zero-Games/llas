@@ -98,14 +98,17 @@
 
     <!-- Add audio meter -->
     <div class="space-y-2">
-        <label class="text-sm text-gray-300">Input Level</label>
-        <AudioMeter {stream} />
+        <label for="input-level" class="text-sm text-gray-300">Input Level</label>
+        <div id="input-level">
+            <AudioMeter {stream} />
+        </div>
     </div>
 
     <!-- Add volume controls -->
     <div class="space-y-2">
-        <label class="text-sm text-gray-300">Input Volume</label>
+        <label for="input-volume" class="text-sm text-gray-300">Input Volume</label>
         <input 
+            id="input-volume"
             type="range" 
             min="0" 
             max="1" 

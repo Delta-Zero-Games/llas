@@ -63,7 +63,7 @@
                   ? qualityConfig[$networkStore.stats.connectionQuality].color
                   : 'bg-gray-600'
                 }`}
-              />
+              ></div>
             {/each}
           </div>
         </div>
