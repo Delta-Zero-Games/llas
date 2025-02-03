@@ -34,6 +34,15 @@ const initialState: NetworkState = {
 function createNetworkStore() {
   const { subscribe, set, update } = writable<NetworkState>(initialState);
 
+  // Listen for connection status events from the backend
+  listen<{ isConnected: boolean; stats: NetworkStats }>('connection_status', (event) => {
+    update(state => ({
+      ...state,
+      isConnected: event.payload.isConnected,
+      stats: event.payload.stats
+    }));
+  });
+
   return {
     subscribe,
     
@@ -47,12 +56,7 @@ function createNetworkStore() {
     startStreaming: async (roomId: string) => {
       try {
         await invoke('start_streaming', { roomId });
-        update(state => ({
-          ...state,
-          isConnected: true,
-          currentRoomId: roomId,
-          error: null
-        }));
+        // Don't update state here, wait for the connection_status event
       } catch (error) {
         console.error('Failed to start streaming:', error);
         update(state => ({

@@ -1,23 +1,22 @@
 // src-tauri/src/audio/network.rs
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, broadcast};
-use parking_lot::Mutex;
+use tokio::sync::{broadcast, mpsc, Mutex};
+use std::collections::HashMap;
 use bytes::{BytesMut, BufMut};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-use std::sync::Arc;
-use std::collections::{HashMap, VecDeque};
-use super::processor::AudioProcessor;
-use crate::config::TurnConfig;
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::time::{Duration, Instant};
+use tauri::AppHandle;
+use serde_json;
 
 // Constants for TURN
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
 const ALLOCATION_REQUEST: u16 = 0x0003;
-const XOR_MAPPED_ADDRESS: u16 = 0x0016;
-const LIFETIME: u16 = 0x000D;
+const REQUESTED_TRANSPORT: u16 = 0x0019;
+const REALM: u16 = 0x0014;
+const RELAYED_ADDRESS: u16 = 0x0016;
 
 #[derive(Debug, Clone)]
 pub struct NetworkStats {
@@ -190,127 +189,88 @@ impl JitterBuffer {
 pub struct AudioNetwork {
     socket: Arc<UdpSocket>,
     turn_socket: Arc<UdpSocket>,
-    peers: Vec<SocketAddr>,
+    peers: Arc<Mutex<Vec<SocketAddr>>>,
     buffer_size: usize,
     sequence: u32,
     audio_tx: broadcast::Sender<(Vec<u8>, SocketAddr)>,
     jitter_buffers: HashMap<SocketAddr, JitterBuffer>,
-    quality_monitors: HashMap<SocketAddr, QualityMonitor>,
-    stats_tx: broadcast::Sender<(SocketAddr, NetworkStats)>,
+    quality_monitors: Arc<Mutex<HashMap<SocketAddr, QualityMonitor>>>,
+    stats_tx: Option<broadcast::Sender<(SocketAddr, NetworkStats)>>,
 }
 
 impl AudioNetwork {
-    pub async fn new(bind_addr: &str, turn_config: TurnConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        // Bind a UDP socket.
-        let socket = UdpSocket::bind(bind_addr).await?;
-        socket.set_ttl(32)?;
+    pub async fn new(app_handle: AppHandle, bind_addr: &str, turn_config: TurnConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let local_socket = UdpSocket::bind(bind_addr).await?;
+        let turn_socket = Self::setup_turn_connection(&turn_config, local_socket).await?;
 
-        // Convert the socket to its std version to clone it.
-        let std_socket = socket.into_std()?;
-        let std_socket_clone = std_socket.try_clone()?;
-        let socket = UdpSocket::from_std(std_socket)?;
-        let turn_socket = Self::setup_turn_connection(&turn_config, UdpSocket::from_std(std_socket_clone)?).await?;
+        // Emit connection status event
+        app_handle.emit("connection_status", 
+            serde_json::json!({
+                "isConnected": true,
+                "stats": {
+                    "latency": 0,
+                    "packetLoss": 0,
+                    "jitter": 0,
+                    "bufferSize": 0,
+                    "connectionQuality": "Good"
+                }
+            })
+        )?;
 
         let (audio_tx, _) = broadcast::channel(100);
         let (stats_tx, _) = broadcast::channel(100);
 
         Ok(Self {
-            socket: Arc::new(socket),
+            socket: Arc::new(local_socket),
             turn_socket: Arc::new(turn_socket),
-            peers: Vec::new(),
+            peers: Arc::new(Mutex::new(Vec::new())),
             buffer_size: 480,
             sequence: 0,
             audio_tx,
             jitter_buffers: HashMap::new(),
-            quality_monitors: HashMap::new(),
-            stats_tx,
+            quality_monitors: Arc::new(Mutex::new(HashMap::new())),
+            stats_tx: Some(stats_tx),
         })
     }
 
-    async fn setup_turn_connection(
-        config: &TurnConfig,
-        local_socket: UdpSocket
-    ) -> Result<UdpSocket, Box<dyn std::error::Error>> {
-        // Remove "turn:" prefix if present.
-        let url = config.url.trim_start_matches("turn:");
-        let server_addr: SocketAddr = url.parse()?;
-        local_socket.connect(server_addr).await?;
-
-        // Create TURN allocation request.
-        let mut request = Vec::new();
-        request.write_u16::<BigEndian>(ALLOCATION_REQUEST)?; // Message Type
-        request.write_u16::<BigEndian>(0)?; // Message Length (placeholder)
-        request.write_u32::<BigEndian>(STUN_MAGIC_COOKIE)?;
-        let transaction_id: [u8; 12] = rand::random();
-        request.write_all(&transaction_id)?;
-
-        // Add credentials.
-        let username = config.username.as_bytes();
-        let credential = config.credential.as_bytes();
-        request.write_u16::<BigEndian>(0x0006)?; // Username type
-        request.write_u16::<BigEndian>(username.len() as u16)?;
-        request.write_all(username)?;
-        pad_to_multiple_of_4(&mut request);
-
-        // Message Integrity attribute (HMAC-SHA1)
-        let key = hmac_key(username, credential, &config.realm);
-        let hmac = hmac_sha1(&key, &request);
-        request.write_u16::<BigEndian>(0x0008)?; // Message-Integrity type
-        request.write_u16::<BigEndian>(20)?; // 20 bytes
-        request.write_all(&hmac)?;
-
-        // Update message length.
-        let message_length = (request.len() - 20) as u16;
-        request[2..4].copy_from_slice(&message_length.to_be_bytes());
-
-        local_socket.send(&request).await?;
-
-        let mut response = vec![0u8; 1024];
-        let size = local_socket.recv(&mut response).await?;
-
-        if let Some(relayed_address) = process_turn_response(&response[..size])? {
-            println!("TURN allocation successful. Relayed address: {}", relayed_address);
-        } else {
-            return Err("Failed to get relayed address from TURN server".into());
-        }
-
-        Ok(local_socket)
-    }
-
-    pub async fn send_audio(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        let mut packet = BytesMut::with_capacity(self.buffer_size + 12);
-        packet.put_u32(self.sequence);
-        self.sequence = self.sequence.wrapping_add(1);
-        packet.put_u64(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as u64);
-        packet.put_slice(data);
-
-        for peer in &self.peers {
-            self.turn_socket.send_to(&packet, peer).await?;
-        }
-        Ok(())
-    }
-
-    pub fn add_peer(&mut self, addr: SocketAddr) {
-        if !self.peers.contains(&addr) {
-            self.peers.push(addr);
+    pub async fn add_peer(&self, addr: SocketAddr) {
+        let mut peers = self.peers.lock().await;
+        if !peers.contains(&addr) {
+            peers.push(addr);
             self.jitter_buffers.insert(addr, JitterBuffer::new(20, 50));
-            self.quality_monitors.insert(addr, QualityMonitor::new());
+            let mut monitors = self.quality_monitors.lock().await;
+            monitors.insert(addr, QualityMonitor::new());
         }
     }
 
-    pub fn remove_peer(&mut self, addr: &SocketAddr) {
-        self.peers.retain(|x| x != addr);
+    pub async fn remove_peer(&self, addr: &SocketAddr) {
+        let mut peers = self.peers.lock().await;
+        peers.retain(|x| x != addr);
         self.jitter_buffers.remove(addr);
     }
 
-    pub async fn start_streaming(&mut self, mut rx: mpsc::Receiver<Vec<u8>>) {
+    pub async fn start_streaming(&mut self, app_handle: AppHandle, mut rx: mpsc::Receiver<Vec<u8>>) {
         let socket = self.turn_socket.clone();
         let peers = self.peers.clone();
+
+        // Emit connection status event
+        app_handle.emit("connection_status",
+            serde_json::json!({
+                "isConnected": true,
+                "stats": {
+                    "latency": 0,
+                    "packetLoss": 0,
+                    "jitter": 0,
+                    "bufferSize": 0,
+                    "connectionQuality": "Good"
+                }
+            })
+        ).unwrap();
+
         tokio::spawn(async move {
             while let Some(audio_data) = rx.recv().await {
-                for peer in &peers {
+                let peers_guard = peers.lock().await;
+                for peer in peers_guard.iter() {
                     let mut packet = BytesMut::with_capacity(audio_data.len() + 12);
                     packet.put_u32(0);
                     packet.put_u64(std::time::SystemTime::now()
@@ -326,71 +286,67 @@ impl AudioNetwork {
         });
     }
 
-    pub async fn handle_incoming(&mut self, processor: Arc<Mutex<AudioProcessor>>) {
+    pub async fn handle_incoming(&mut self, processor: Arc<Mutex<AudioProcessor>>, app_handle: AppHandle) {
         let socket = self.turn_socket.clone();
         let audio_tx = self.audio_tx.clone();
         let mut audio_rx = self.audio_tx.subscribe();
         let jitter_buffers = Arc::new(Mutex::new(self.jitter_buffers.clone()));
-        let quality_monitors = Arc::new(Mutex::new(self.quality_monitors.clone()));
-        let stats_tx = self.stats_tx.clone();
+        let quality_monitors = self.quality_monitors.clone();
+        let stats_tx = self.stats_tx.clone().unwrap();
 
         // Task to handle incoming packets.
         let jb_clone = jitter_buffers.clone();
-        let qm_clone = quality_monitors.clone();
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 2048];
             loop {
                 match socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
+                        if size < 12 {
+                            continue;
+                        }
                         let sequence = u32::from_be_bytes([
                             buffer[0], buffer[1], buffer[2], buffer[3]
                         ]);
-                        {
-                            let mut monitors = qm_clone.lock();
-                            if let Some(monitor) = monitors.get_mut(&addr) {
-                                monitor.update(sequence, Instant::now());
-                                let stats = monitor.get_stats();
-                                let _ = stats_tx.send((addr, stats));
-                            }
-                        }
+                        let timestamp = u64::from_be_bytes([
+                            buffer[4], buffer[5], buffer[6], buffer[7],
+                            buffer[8], buffer[9], buffer[10], buffer[11]
+                        ]);
                         let audio_data = buffer[12..size].to_vec();
-                        let mut buffers = jb_clone.lock();
+                        
+                        let mut buffers = jb_clone.lock().await;
                         if let Some(jitter_buffer) = buffers.get_mut(&addr) {
-                            jitter_buffer.add_packet(sequence, audio_data);
+                            jitter_buffer.add_packet(sequence, audio_data.clone());
                             while let Some(data) = jitter_buffer.get_next_packet() {
                                 let _ = audio_tx.send((data, addr));
                             }
                         }
-                    }
-                    Err(e) => eprintln!("Error receiving audio: {}", e),
-                }
-            }
-        });
 
-        // Task to process audio data.
-        tokio::spawn(async move {
-            while let Ok((audio_data, _addr)) = audio_rx.recv().await {
-                let processor = processor.lock();
-                if let Err(e) = processor.process_incoming(&audio_data) {
-                    eprintln!("Error processing audio: {}", e);
+                        let mut monitors = quality_monitors.lock().await;
+                        if let Some(monitor) = monitors.get_mut(&addr) {
+                            monitor.update(timestamp);
+                            let stats = monitor.get_stats();
+                            let _ = stats_tx.send((addr, stats));
+                        }
+
+                        let processor_guard = processor.lock().await;
+                        if let Err(e) = processor_guard.process_incoming(&audio_data) {
+                            eprintln!("Error processing audio: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error receiving audio: {}", e);
+                    }
                 }
             }
         });
     }
 
-    pub fn get_local_addr(&self) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    pub async fn local_addr(&self) -> Result<SocketAddr, Box<dyn std::error::Error>> {
         Ok(self.turn_socket.local_addr()?)
     }
 
-    pub fn new_sync() -> Result<Self, Box<dyn std::error::Error>> {
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async {
-            Self::new("0.0.0.0:0", TurnConfig::default()).await
-        })
-    }
-
     pub fn subscribe_to_stats(&self) -> broadcast::Receiver<(SocketAddr, NetworkStats)> {
-        self.stats_tx.subscribe()
+        self.stats_tx.clone().unwrap().subscribe()
     }
 }
 
@@ -421,32 +377,69 @@ fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
 
 fn process_turn_response(response: &[u8]) -> Result<Option<SocketAddr>, Box<dyn std::error::Error>> {
     if response.len() < 20 {
+        println!("Response too short: {} bytes", response.len());
         return Ok(None);
     }
+
     let message_type = u16::from_be_bytes([response[0], response[1]]);
+    println!("Response message type: 0x{:04x}", message_type);
+
     if message_type != 0x0103 { // Allocation Success
+        // Check for error response and handle 401 Unauthorized
+        if message_type == 0x0111 {
+            println!("Received error response (401 Unauthorized) from TURN server");
+            // Print error code if available
+            let mut pos = 20;
+            while pos + 4 <= response.len() {
+                let attr_type = u16::from_be_bytes([response[pos], response[pos + 1]]);
+                let attr_len = u16::from_be_bytes([response[pos + 2], response[pos + 3]]) as usize;
+                if attr_type == 0x0009 { // ERROR-CODE
+                    let error_code = response[pos + 7];
+                    println!("Error code: {}", error_code);
+                }
+                pos += 4 + attr_len;
+                if attr_len % 4 != 0 {
+                    pos += 4 - (attr_len % 4);
+                }
+            }
+            return Ok(None);
+        }
+        println!("Unexpected message type: 0x{:04x}", message_type);
         return Ok(None);
     }
+
     let mut pos = 20;
+    println!("Scanning response attributes");
     while pos + 4 <= response.len() {
         let attr_type = u16::from_be_bytes([response[pos], response[pos + 1]]);
         let attr_len = u16::from_be_bytes([response[pos + 2], response[pos + 3]]) as usize;
-        if attr_type == XOR_MAPPED_ADDRESS {
+        println!("Found attribute type: 0x{:04x}, length: {}", attr_type, attr_len);
+
+        if attr_type == RELAYED_ADDRESS {
+            println!("Found RELAYED-ADDRESS attribute");
             let family = response[pos + 5];
             let port = u16::from_be_bytes([response[pos + 6], response[pos + 7]])
                 ^ ((STUN_MAGIC_COOKIE >> 16) as u16);
+
             if family == 0x01 { // IPv4
                 let mut addr = [0u8; 4];
                 for i in 0..4 {
                     addr[i] = response[pos + 8 + i] ^ ((STUN_MAGIC_COOKIE >> (24 - i * 8)) as u8);
                 }
-                return Ok(Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port)));
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port);
+                println!("Successfully parsed relayed address: {}", addr);
+                return Ok(Some(addr));
+            } else {
+                println!("Unsupported address family: {}", family);
             }
         }
+
         pos += 4 + attr_len;
         if attr_len % 4 != 0 {
             pos += 4 - (attr_len % 4);
         }
     }
+
+    println!("No RELAYED-ADDRESS attribute found");
     Ok(None)
 }

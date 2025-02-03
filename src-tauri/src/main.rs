@@ -14,6 +14,7 @@ use crate::audio::{AudioProcessor, AudioNetwork};
 use crate::config::TurnConfig;
 use tokio::sync::mpsc;
 use parking_lot::Mutex as PLMutex;
+use dotenv::dotenv;
 
 type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
 type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
@@ -51,11 +52,11 @@ async fn create_room(
     Ok(manager.create_room(name, user_id))
 }
 
-async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
+async fn init_network(app_handle: tauri::AppHandle, network: &SafeAudioNetwork) -> Result<(), String> {
     let turn_config = TurnConfig::default();
     let mut network_lock = network.lock().await;
     if network_lock.is_none() {
-        let new_network = AudioNetwork::new("0.0.0.0:0", turn_config)
+        let new_network = AudioNetwork::new(app_handle, "0.0.0.0:0", turn_config)
             .await
             .map_err(|e| e.to_string())?;
         *network_lock = Some(new_network);
@@ -65,6 +66,7 @@ async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
 
 #[tauri::command]
 async fn join_room(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     room_id: String,
     user_id: String,
@@ -73,7 +75,7 @@ async fn join_room(
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
     
     // Initialize network
-    init_network(&state.network).await?;
+    init_network(app_handle, &state.network).await?;
     
     let peer_addr = {
         let network = state.network.lock().await;
@@ -136,66 +138,36 @@ async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8
 }
 
 #[tauri::command]
-async fn start_streaming(
-    state: State<'_, AppState>,
-    room_id: String
-) -> Result<(), String> {
+async fn start_streaming(app_handle: tauri::AppHandle, state: State<'_, AppState>, room_id: String) -> Result<(), String> {
     println!("Starting streaming for room: {}", room_id);
     let (tx, rx) = mpsc::channel(32);
 
-    // Initialize audio processor if not already initialized
-    {
+    // Get the processor reference
+    let processor = {
         let mut processor = state.audio_processor.lock().await;
         if processor.is_none() {
-            println!("Initializing audio processor");
-            let (audio_tx, _) = mpsc::channel(32); // Create a separate channel for the audio processor
-            *processor = Some(AudioProcessor::new(audio_tx).map_err(|e| e.to_string())?);
-            println!("Audio processor initialized successfully");
+            *processor = Some(AudioProcessor::new());
         }
-    }
-    
-    println!("Setting up processor with channel");
-    // Setup processor with the channel
-    setup_processor(&state.audio_processor, tx).await?;
-    println!("Processor setup complete");
-    
-    let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
-    let peers = {
-        let manager = state.room_manager.lock().await;
-        let peers = manager.get_room_peers(&room_id);
-        println!("Found {} peers in room", peers.len());
-        peers
+        Arc::new(processor.clone().unwrap())
     };
 
     // Initialize network if not already initialized
     println!("Initializing network");
-    init_network(&state.network).await?;
+    init_network(app_handle.clone(), &state.network).await?;
     println!("Network initialized");
 
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
-        for peer_addr in peers {
-            println!("Adding peer: {}", peer_addr);
-            net.add_peer(peer_addr);
-        }
+        // Start audio streaming
         println!("Starting audio streaming");
-        net.start_streaming(rx).await;
+        net.start_streaming(app_handle.clone(), rx).await;
         println!("Audio streaming started");
-        
-        // Get the processor reference
-        let processor = {
-            let guard = state.audio_processor.lock().await;
-            guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
-        };
-        
-        // Create a new Arc<Mutex<AudioProcessor>> for the network
-        let network_processor = Arc::new(PLMutex::new(processor));
-        println!("Starting to handle incoming audio");
-        net.handle_incoming(network_processor).await;
-        println!("Handling incoming audio started");
+
+        // Start handling incoming audio
+        net.handle_incoming(processor, app_handle).await;
+        println!("Started handling incoming audio");
     }
-    
-    println!("Streaming setup complete");
+
     Ok(())
 }
 
@@ -258,8 +230,17 @@ async fn set_user_volume(
 }
 
 fn main() {
+    // Load environment variables from .env file
+    if let Err(e) = dotenv() {
+        eprintln!("Warning: Failed to load .env file: {}", e);
+    }
+
     tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(AppState {
+            room_manager: Arc::new(Mutex::new(RoomManager::new())),
+            network: Arc::new(Mutex::new(None)),
+            audio_processor: Arc::new(Mutex::new(None)),
+        })
         .invoke_handler(tauri::generate_handler![
             add_user,
             create_room,
