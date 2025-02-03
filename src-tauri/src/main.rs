@@ -140,21 +140,47 @@ async fn start_streaming(
     state: State<'_, AppState>,
     room_id: String
 ) -> Result<(), String> {
+    println!("Starting streaming for room: {}", room_id);
     let (tx, rx) = mpsc::channel(32);
+
+    // Initialize audio processor if not already initialized
+    {
+        let mut processor = state.audio_processor.lock().await;
+        if processor.is_none() {
+            println!("Initializing audio processor");
+            let (audio_tx, _) = mpsc::channel(32); // Create a separate channel for the audio processor
+            *processor = Some(AudioProcessor::new(audio_tx).map_err(|e| e.to_string())?);
+            println!("Audio processor initialized successfully");
+        }
+    }
+    
+    println!("Setting up processor with channel");
+    // Setup processor with the channel
     setup_processor(&state.audio_processor, tx).await?;
+    println!("Processor setup complete");
     
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let peers = {
         let manager = state.room_manager.lock().await;
-        manager.get_room_peers(&room_id)
+        let peers = manager.get_room_peers(&room_id);
+        println!("Found {} peers in room", peers.len());
+        peers
     };
+
+    // Initialize network if not already initialized
+    println!("Initializing network");
+    init_network(&state.network).await?;
+    println!("Network initialized");
 
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
         for peer_addr in peers {
+            println!("Adding peer: {}", peer_addr);
             net.add_peer(peer_addr);
         }
+        println!("Starting audio streaming");
         net.start_streaming(rx).await;
+        println!("Audio streaming started");
         
         // Get the processor reference
         let processor = {
@@ -164,9 +190,12 @@ async fn start_streaming(
         
         // Create a new Arc<Mutex<AudioProcessor>> for the network
         let network_processor = Arc::new(PLMutex::new(processor));
+        println!("Starting to handle incoming audio");
         net.handle_incoming(network_processor).await;
+        println!("Handling incoming audio started");
     }
     
+    println!("Streaming setup complete");
     Ok(())
 }
 

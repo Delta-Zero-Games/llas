@@ -1,6 +1,5 @@
 // ui/src/lib/stores/networkStore.ts
 import { writable, get } from 'svelte/store';
-import type { PeerConnection } from '../types/network';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -14,18 +13,14 @@ export interface NetworkStats {
 
 export interface NetworkState {
   isConnected: boolean;
-  peers: Map<string, PeerConnection>;
-  localSessionId: string;
-  currentPeer: string | null;
+  currentRoomId: string | null;
   stats: NetworkStats;
   error: string | null;
 }
 
 const initialState: NetworkState = {
   isConnected: false,
-  peers: new Map(),
-  localSessionId: crypto.randomUUID(),
-  currentPeer: null,
+  currentRoomId: null,
   stats: {
     latency: 0,
     packetLoss: 0,
@@ -42,54 +37,47 @@ function createNetworkStore() {
   return {
     subscribe,
     
-    addPeer: (peerId: string, connection: PeerConnection) =>
-      update(state => {
-        state.peers.set(peerId, connection);
-        return { ...state };
-      }),
-
-    removePeer: (peerId: string) =>
-      update(state => {
-        state.peers.delete(peerId);
-        if (state.currentPeer === peerId) {
-          state.currentPeer = null;
-        }
-        return { ...state };
-      }),
-
-    setConnected: (isConnected: boolean, peer?: string) =>
+    setConnected: (isConnected: boolean, roomId?: string) =>
       update(state => ({ 
         ...state, 
         isConnected,
-        currentPeer: peer || state.currentPeer
+        currentRoomId: roomId || state.currentRoomId
       })),
 
-    startMonitoring: async () => {
+    startStreaming: async (roomId: string) => {
       try {
-        // Start the network stats monitoring on the Rust side
-        await invoke('subscribe_to_network_stats');
-        
-        // Listen for network stats events
-        const unlisten = await listen<any>('network-stats', (event) => {
-          update(state => ({
-            ...state,
-            stats: {
-              latency: event.payload.latency,
-              packetLoss: event.payload.packet_loss,
-              jitter: event.payload.jitter,
-              bufferSize: event.payload.buffer_size,
-              connectionQuality: event.payload.connection_quality
-            }
-          }));
-        });
-        
-        // Store the unlisten function for cleanup
-        return unlisten;
-      } catch (err) {
-        console.error('Failed to start network monitoring:', err);
+        await invoke('start_streaming', { roomId });
         update(state => ({
           ...state,
-          error: err instanceof Error ? err.message : 'Failed to start network monitoring'
+          isConnected: true,
+          currentRoomId: roomId,
+          error: null
+        }));
+      } catch (error) {
+        console.error('Failed to start streaming:', error);
+        update(state => ({
+          ...state,
+          isConnected: false,
+          error: error instanceof Error ? error.message : 'Failed to start streaming'
+        }));
+        throw error; // Re-throw to let components handle it
+      }
+    },
+
+    stopStreaming: async () => {
+      try {
+        await invoke('stop_streaming');
+        update(state => ({
+          ...state,
+          isConnected: false,
+          currentRoomId: null,
+          error: null
+        }));
+      } catch (err) {
+        console.error('Failed to stop streaming:', err);
+        update(state => ({
+          ...state,
+          error: err instanceof Error ? err.message : 'Failed to stop streaming'
         }));
       }
     },
@@ -103,25 +91,8 @@ function createNetworkStore() {
     setError: (error: string | null) =>
       update(state => ({ ...state, error })),
 
-    reset: () => set(initialState),
-
-    getPeer: (peerId: string) => {
-      const state = get(networkStore);
-      return state.peers.get(peerId);
-    },
-
-    getPeers: () => {
-      const state = get(networkStore);
-      return Array.from(state.peers.values());
-    }
+    reset: () => set(initialState)
   };
 }
 
 export const networkStore = createNetworkStore();
-
-// Subscribe to changes to update connection status
-networkStore.subscribe(state => {
-  if (state.peers.size === 0 && state.isConnected) {
-    networkStore.setConnected(false);
-  }
-});
