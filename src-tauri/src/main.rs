@@ -53,6 +53,10 @@ async fn create_room(
 
 async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
     let turn_config = TurnConfig::default();
+    println!("Initializing with TURN config:");
+    println!("URL: {}", turn_config.url);
+    println!("Username: {}", turn_config.username);
+    println!("Realm: {}", turn_config.realm);
     let mut network_lock = network.lock().await;
     if network_lock.is_none() {
         let new_network = AudioNetwork::new("0.0.0.0:0", turn_config)

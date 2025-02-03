@@ -18,6 +18,8 @@ const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
 const ALLOCATION_REQUEST: u16 = 0x0003;
 const XOR_MAPPED_ADDRESS: u16 = 0x0016;
 const LIFETIME: u16 = 0x000D;
+const REALM_ATTR: u16 = 0x0014;
+const NONCE_ATTR: u16 = 0x0015;
 
 #[derive(Debug, Clone)]
 pub struct NetworkStats {
@@ -192,7 +194,7 @@ pub struct AudioNetwork {
     turn_socket: Arc<UdpSocket>,
     peers: Vec<SocketAddr>,
     buffer_size: usize,
-    sequence: u32,
+    sequence: std::sync::atomic::AtomicU32,
     audio_tx: broadcast::Sender<(Vec<u8>, SocketAddr)>,
     jitter_buffers: HashMap<SocketAddr, JitterBuffer>,
     quality_monitors: HashMap<SocketAddr, QualityMonitor>,
@@ -219,7 +221,7 @@ impl AudioNetwork {
             turn_socket: Arc::new(turn_socket),
             peers: Vec::new(),
             buffer_size: 480,
-            sequence: 0,
+            sequence: std::sync::atomic::AtomicU32::new(0),
             audio_tx,
             jitter_buffers: HashMap::new(),
             quality_monitors: HashMap::new(),
@@ -231,10 +233,13 @@ impl AudioNetwork {
         config: &TurnConfig,
         local_socket: UdpSocket
     ) -> Result<UdpSocket, Box<dyn std::error::Error>> {
+        println!("Starting TURN connection setup...");
         // Remove "turn:" prefix if present.
         let url = config.url.trim_start_matches("turn:");
         let server_addr: SocketAddr = url.parse()?;
+        println!("Connecting to TURN server at: {}", server_addr);
         local_socket.connect(server_addr).await?;
+        println!("Connected to TURN server");
 
         // Create TURN allocation request.
         let mut request = Vec::new();
@@ -244,9 +249,23 @@ impl AudioNetwork {
         let transaction_id: [u8; 12] = rand::random();
         request.write_all(&transaction_id)?;
 
+        // Add REQUESTED-TRANSPORT attribute (Required for allocation)
+        request.write_u16::<BigEndian>(0x0019)?; // REQUESTED-TRANSPORT
+        request.write_u16::<BigEndian>(4)?; // Length
+        request.write_u8(17)?; // UDP protocol number
+        request.write_all(&[0; 3])?; // Reserved padding
+
+        // Add REALM attribute
+        let realm = config.realm.as_bytes();
+        request.write_u16::<BigEndian>(REALM_ATTR)?;
+        request.write_u16::<BigEndian>(realm.len() as u16)?;
+        request.write_all(realm)?;
+        pad_to_multiple_of_4(&mut request);
+
         // Add credentials.
         let username = config.username.as_bytes();
         let credential = config.credential.as_bytes();
+        println!("Adding credentials - Username length: {}", username.len());
         request.write_u16::<BigEndian>(0x0006)?; // Username type
         request.write_u16::<BigEndian>(username.len() as u16)?;
         request.write_all(username)?;
@@ -263,30 +282,45 @@ impl AudioNetwork {
         let message_length = (request.len() - 20) as u16;
         request[2..4].copy_from_slice(&message_length.to_be_bytes());
 
+        println!("Sending TURN allocation request...");
+        println!("Request bytes: {:02x?}", request);
         local_socket.send(&request).await?;
+        println!("Request sent, waiting for response...");
 
         let mut response = vec![0u8; 1024];
         let size = local_socket.recv(&mut response).await?;
+        println!("Received response of {} bytes", size);
+        println!("Response bytes: {:02x?}", &response[..size]);
+
+        if size >= 2 {
+            let message_type = u16::from_be_bytes([response[0], response[1]]);
+            println!("Response message type: 0x{:04x}", message_type);
+        }
 
         if let Some(relayed_address) = process_turn_response(&response[..size])? {
             println!("TURN allocation successful. Relayed address: {}", relayed_address);
+            Ok(local_socket)
         } else {
-            return Err("Failed to get relayed address from TURN server".into());
+            println!("Failed to get relayed address from response");
+            Err("Failed to get relayed address from TURN server".into())
         }
-
-        Ok(local_socket)
     }
 
     pub async fn send_audio(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        let mut packet = BytesMut::with_capacity(self.buffer_size + 12);
-        packet.put_u32(self.sequence);
-        self.sequence = self.sequence.wrapping_add(1);
-        packet.put_u64(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as u64);
-        packet.put_slice(data);
+        let sequence = self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut packet = Vec::with_capacity(data.len() + 4);
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(data);
 
-        for peer in &self.peers {
+        // Send to all peers through TURN server
+        let peers = self.peers.clone();
+        if peers.is_empty() {
+            println!("No peers to send audio to");
+            return Ok(());
+        }
+
+        for peer in peers {
+            println!("Sending {} bytes of audio data to peer {}", packet.len(), peer);
             self.turn_socket.send_to(&packet, peer).await?;
         }
         Ok(())
@@ -339,30 +373,38 @@ impl AudioNetwork {
         let qm_clone = quality_monitors.clone();
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 2048];
+            println!("Started listening for incoming audio packets");
             loop {
                 match socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
+                        if size < 4 {
+                            println!("Received packet too small: {} bytes from {}", size, addr);
+                            continue;
+                        }
+
                         let sequence = u32::from_be_bytes([
                             buffer[0], buffer[1], buffer[2], buffer[3]
                         ]);
+                        
+                        println!("Received {} bytes from {}, sequence: {}", size, addr, sequence);
+
                         {
                             let mut monitors = qm_clone.lock();
                             if let Some(monitor) = monitors.get_mut(&addr) {
                                 monitor.update(sequence, Instant::now());
                                 let stats = monitor.get_stats();
-                                let _ = stats_tx.send((addr, stats));
+                                let _ = stats_tx.send((addr, stats.clone()));
+                                println!("Network stats for {}: latency={:?}, packet_loss={:.2}%, jitter={:?}", 
+                                    addr, stats.latency, stats.packet_loss * 100.0, stats.jitter);
                             }
                         }
-                        let audio_data = buffer[12..size].to_vec();
-                        let mut buffers = jb_clone.lock();
-                        if let Some(jitter_buffer) = buffers.get_mut(&addr) {
-                            jitter_buffer.add_packet(sequence, audio_data);
-                            while let Some(data) = jitter_buffer.get_next_packet() {
-                                let _ = audio_tx.send((data, addr));
-                            }
-                        }
+
+                        let audio_data = &buffer[4..size];
+                        let _ = audio_tx.send((audio_data.to_vec(), addr));
                     }
-                    Err(e) => eprintln!("Error receiving audio: {}", e),
+                    Err(e) => {
+                        println!("Error receiving audio packet: {}", e);
+                    }
                 }
             }
         });
@@ -423,14 +465,58 @@ fn process_turn_response(response: &[u8]) -> Result<Option<SocketAddr>, Box<dyn 
     if response.len() < 20 {
         return Ok(None);
     }
+
     let message_type = u16::from_be_bytes([response[0], response[1]]);
-    if message_type != 0x0103 { // Allocation Success
+    println!("Processing response with type: 0x{:04x}", message_type);
+
+    // Check if it's an error response
+    if message_type & 0x0110 == 0x0110 {
+        // Look for ERROR-CODE attribute (0x0009)
+        let mut pos = 20;
+        while pos + 4 <= response.len() {
+            let attr_type = u16::from_be_bytes([response[pos], response[pos + 1]]);
+            let attr_len = u16::from_be_bytes([response[pos + 2], response[pos + 3]]) as usize;
+            println!("Found attribute type: 0x{:04x}, length: {}", attr_type, attr_len);
+
+            if attr_type == 0x0009 && pos + 8 <= response.len() { // ERROR-CODE
+                let error_class = response[pos + 6] as u16;
+                let error_number = response[pos + 7] as u16;
+                let error_code = error_class * 100 + error_number;
+                
+                println!("Error bytes: {:02x?}", &response[pos..pos + 8]);
+                println!("Error class: {}, number: {}", error_class, error_number);
+                println!("Received error response. Error code: {}", error_code);
+                match error_code {
+                    401 => println!("Unauthorized: Need to include REALM and NONCE attributes"),
+                    431 => println!("Integrity Check Failure: Authentication failed"),
+                    437 => println!("Allocation Mismatch: Request conflicts with existing allocation"),
+                    441 => println!("Wrong Credentials"),
+                    486 => println!("Allocation Quota Reached"),
+                    508 => println!("Insufficient Port Capacity"),
+                    _ => println!("Unknown error code: {}", error_code),
+                }
+                return Ok(None);
+            }
+            pos += 4 + attr_len;
+            if attr_len % 4 != 0 {
+                pos += 4 - (attr_len % 4);
+            }
+        }
+        println!("Error response but no ERROR-CODE attribute found");
         return Ok(None);
     }
+
+    if message_type != 0x0103 { // Not an Allocation Success
+        println!("Unexpected message type: 0x{:04x}", message_type);
+        return Ok(None);
+    }
+
     let mut pos = 20;
     while pos + 4 <= response.len() {
         let attr_type = u16::from_be_bytes([response[pos], response[pos + 1]]);
         let attr_len = u16::from_be_bytes([response[pos + 2], response[pos + 3]]) as usize;
+        println!("Found attribute type: 0x{:04x}, length: {}", attr_type, attr_len);
+
         if attr_type == XOR_MAPPED_ADDRESS {
             let family = response[pos + 5];
             let port = u16::from_be_bytes([response[pos + 6], response[pos + 7]])
