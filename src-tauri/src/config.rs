@@ -1,4 +1,5 @@
 // src-tauri/src/config.rs
+
 use serde::{Serialize, Deserialize};
 use std::env;
 use dotenv::dotenv;
@@ -13,8 +14,8 @@ pub struct TurnConfig {
 
 impl Default for TurnConfig {
     fn default() -> Self {
-        dotenv().ok();  // Load .env file if it exists
-        
+        dotenv().ok(); // Load .env file if it exists
+
         let url = env::var("TURN_SERVER_URL")
             .expect("TURN_SERVER_URL must be set in environment");
         let username = env::var("TURN_USERNAME")
@@ -25,10 +26,26 @@ impl Default for TurnConfig {
             .expect("TURN_REALM must be set in environment");
 
         Self {
+            // Ensure the URL starts with "turn:".
             url: if url.starts_with("turn:") { url } else { format!("turn:{}", url) },
             username,
             credential,
             realm,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisConfig {
+    pub url: String,
+}
+
+impl Default for RedisConfig {
+    fn default() -> Self {
+        dotenv().ok(); // Load .env file if it exists
+
+        let url = env::var("REDIS_URL")
+            .expect("REDIS_URL must be set in environment");
+        Self { url }
     }
 }

@@ -75,6 +75,10 @@ impl RoomManager {
         Ok(())
     }
 
+    pub fn get_room(&self, room_id: &Uuid) -> Option<&Room> {
+        self.rooms.get(room_id)
+    }
+
     pub fn list_rooms(&self) -> Vec<Room> {
         self.rooms.values().cloned().collect()
     }

@@ -63,9 +63,7 @@
     }
 
     // Filter out rooms with no participants if they're not the current room
-    $: activeRooms = $roomStore.rooms.filter(room => 
-      room.id === $roomStore.currentRoom?.id || room.participants.length > 0
-    );
+    $: activeRooms = $roomStore.rooms;
 </script>
   
 <div class="space-y-4">

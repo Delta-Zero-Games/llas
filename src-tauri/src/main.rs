@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod room;
+mod state;
 mod config;
 mod audio;
 
@@ -12,6 +13,7 @@ use uuid::Uuid;
 use crate::room::{RoomManager, Room, User};
 use crate::audio::{AudioProcessor, AudioNetwork};
 use crate::config::TurnConfig;
+use crate::state::StateManager;
 use tokio::sync::mpsc;
 use parking_lot::Mutex as PLMutex;
 
@@ -22,14 +24,19 @@ pub struct AppState {
     room_manager: Arc<Mutex<RoomManager>>,
     audio_processor: SafeAudioProcessor,
     network: SafeAudioNetwork,
+    state_manager: Arc<Mutex<StateManager>>,
 }
 
 impl AppState {
-    fn new() -> Self {
+    pub async fn new() -> Self {
+        let state_manager = StateManager::new()
+            .await
+            .expect("Failed to initialize StateManager");
         Self {
             room_manager: Arc::new(Mutex::new(RoomManager::new())),
             audio_processor: Arc::new(Mutex::new(None)),
             network: Arc::new(Mutex::new(None)),
+            state_manager: Arc::new(Mutex::new(state_manager)),
         }
     }
 }
@@ -48,8 +55,17 @@ async fn create_room(
 ) -> Result<Room, String> {
     let mut manager = state.room_manager.lock().await;
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
-    Ok(manager.create_room(name, user_id))
+    let room = manager.create_room(name, user_id);
+
+    // Persist the new room to Redis
+    {
+        let mut state_mgr = state.state_manager.lock().await;
+        state_mgr.save_room(&room).await.map_err(|e| e.to_string())?;
+    }
+    
+    Ok(room)
 }
+
 
 async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
     let turn_config = TurnConfig::default();
@@ -76,7 +92,7 @@ async fn join_room(
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
     
-    // Initialize network
+    // Initialize network (unchanged)
     init_network(&state.network).await?;
     
     let peer_addr = {
@@ -87,12 +103,13 @@ async fn join_room(
             .map_err(|e| e.to_string())?
     };
 
-    {
+    let room = {
         let mut manager = state.room_manager.lock().await;
+        // Add peer address and update room participants in memory
         manager.add_peer_address(user_id, peer_addr)?;
         let room = manager.join_room(room_id, user_id)?;
         
-        // Add peers to network
+        // Update peers in the network (unchanged)
         {
             let mut network = state.network.lock().await;
             if let Some(net) = network.as_mut() {
@@ -103,9 +120,18 @@ async fn join_room(
                 }
             }
         }
-        Ok(room)
+        room
+    };
+
+    // Persist the updated room to Redis
+    {
+        let mut state_mgr = state.state_manager.lock().await;
+        state_mgr.save_room(&room).await.map_err(|e| e.to_string())?;
     }
+    
+    Ok(room)
 }
+
 
 #[tauri::command]
 async fn leave_room(
@@ -113,17 +139,36 @@ async fn leave_room(
     room_id: String,
     user_id: String,
 ) -> Result<(), String> {
-    let mut manager = state.room_manager.lock().await;
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
-    manager.leave_room(room_id, user_id)
+
+    // Remove the user from the room in memory
+    {
+        let mut manager = state.room_manager.lock().await;
+        manager.leave_room(room_id, user_id)?;
+        
+        // Use the public getter method to check if the room still exists.
+        if let Some(room) = manager.get_room(&room_id) {
+            // Update the room’s participant list in Redis.
+            // (Cloning the room might be necessary if you run into lifetime issues.)
+            let room_clone = room.clone();
+            let mut state_mgr = state.state_manager.lock().await;
+            state_mgr.save_room(&room_clone).await.map_err(|e| e.to_string())?;
+        } else {
+            // If the room was removed, delete it from Redis.
+            let mut state_mgr = state.state_manager.lock().await;
+            state_mgr.delete_room(&room_id).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<Room>, String> {
-    let manager = state.room_manager.lock().await;
-    Ok(manager.list_rooms())
+    let mut state_mgr = state.state_manager.lock().await;
+    state_mgr.list_rooms().await.map_err(|e| e.to_string())
 }
+
 
 async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8>>) -> Result<(), String> {
     let mut processor_lock = processor.lock().await;
@@ -262,8 +307,10 @@ async fn set_user_volume(
 }
 
 fn main() {
+    let app_state = tauri::async_runtime::block_on(AppState::new());
+    
     tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             add_user,
             create_room,
