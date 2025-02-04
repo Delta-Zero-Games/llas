@@ -369,7 +369,7 @@ impl AudioNetwork {
         let stats_tx = self.stats_tx.clone();
 
         // Task to handle incoming packets.
-        let jb_clone = jitter_buffers.clone();
+        let _jb_clone = jitter_buffers.clone();
         let qm_clone = quality_monitors.clone();
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 2048];

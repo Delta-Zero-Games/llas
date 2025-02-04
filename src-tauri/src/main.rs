@@ -6,7 +6,7 @@ mod state;
 mod config;
 mod audio;
 
-use tauri::State;
+use tauri::{State, Manager, Emitter};
 use std::sync::Arc;
 use tokio::sync::Mutex; 
 use uuid::Uuid;
@@ -16,19 +16,40 @@ use crate::config::TurnConfig;
 use crate::state::StateManager;
 use tokio::sync::mpsc;
 use parking_lot::Mutex as PLMutex;
+use serde::Serialize;
 
 type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
 type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
 
+#[derive(Clone, Serialize)]
+pub struct RoomEventPayload {
+    room_id: String,
+    action: String,
+    participants: Vec<User>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AudioEventPayload {
+    is_connected: bool,
+    input_level: f32,
+    output_level: f32,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ErrorEventPayload {
+    code: String,
+    message: String,
+}
 pub struct AppState {
     room_manager: Arc<Mutex<RoomManager>>,
     audio_processor: SafeAudioProcessor,
     network: SafeAudioNetwork,
     state_manager: Arc<Mutex<StateManager>>,
+    app_handle: tauri::AppHandle,
 }
 
 impl AppState {
-    pub async fn new() -> Self {
+    pub async fn new(app_handle: tauri::AppHandle) -> Self {  // Add app_handle parameter
         let state_manager = StateManager::new()
             .await
             .expect("Failed to initialize StateManager");
@@ -37,7 +58,22 @@ impl AppState {
             audio_processor: Arc::new(Mutex::new(None)),
             network: Arc::new(Mutex::new(None)),
             state_manager: Arc::new(Mutex::new(state_manager)),
+            app_handle,  // Now app_handle is available to use
         }
+    }
+    
+    // Rest of the implementation remains the same
+    pub fn emit_event<T: Clone + Serialize>(&self, event: &str, payload: T) {
+        if let Err(e) = self.app_handle.emit(event, payload) {  // Changed from emit_all to emit
+            eprintln!("Failed to emit event {}: {}", event, e);
+        }
+    }
+
+    pub fn emit_error(&self, code: &str, message: &str) {
+        self.emit_event("error", ErrorEventPayload {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
     }
 }
 
@@ -89,27 +125,46 @@ async fn join_room(
     room_id: String,
     user_id: String,
 ) -> Result<Room, String> {
-    let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
-    let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
+    let room_id = Uuid::parse_str(&room_id).map_err(|e| {
+        state.emit_error("INVALID_UUID", &e.to_string());
+        e.to_string()
+    })?;
     
-    // Initialize network (unchanged)
-    init_network(&state.network).await?;
+    let user_id = Uuid::parse_str(&user_id).map_err(|e| {
+        state.emit_error("INVALID_UUID", &e.to_string());
+        e.to_string()
+    })?;
+    
+    // Initialize network
+    if let Err(e) = init_network(&state.network).await {
+        state.emit_error("NETWORK_ERROR", &e);
+        return Err(e);
+    }
     
     let peer_addr = {
         let network = state.network.lock().await;
-        network.as_ref()
-            .ok_or_else(|| "Network not initialized".to_string())?
-            .get_local_addr()
-            .map_err(|e| e.to_string())?
+        match network.as_ref().ok_or_else(|| "Network not initialized".to_string())?.get_local_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                state.emit_error("NETWORK_ERROR", &e.to_string());
+                return Err(e.to_string());
+            }
+        }
     };
 
     let room = {
         let mut manager = state.room_manager.lock().await;
-        // Add peer address and update room participants in memory
-        manager.add_peer_address(user_id, peer_addr)?;
+        
+        // Add peer address
+        if let Err(e) = manager.add_peer_address(user_id, peer_addr) {
+            state.emit_error("PEER_ERROR", &e);
+            return Err(e);
+        }
+        
+        // Join room
         let room = manager.join_room(room_id, user_id)?;
         
-        // Update peers in the network (unchanged)
+        // Update network peers
         {
             let mut network = state.network.lock().await;
             if let Some(net) = network.as_mut() {
@@ -120,13 +175,24 @@ async fn join_room(
                 }
             }
         }
+
+        // Emit room update event
+        state.emit_event("room:update", RoomEventPayload {
+            room_id: room.id.to_string(),
+            action: "join".to_string(),
+            participants: room.participants.clone(),
+        });
+
         room
     };
 
-    // Persist the updated room to Redis
+    // Update Redis
     {
         let mut state_mgr = state.state_manager.lock().await;
-        state_mgr.save_room(&room).await.map_err(|e| e.to_string())?;
+        if let Err(e) = state_mgr.save_room(&room).await {
+            state.emit_error("REDIS_ERROR", &e.to_string());
+            return Err(e.to_string());
+        }
     }
     
     Ok(room)
@@ -307,10 +373,13 @@ async fn set_user_volume(
 }
 
 fn main() {
-    let app_state = tauri::async_runtime::block_on(AppState::new());
-    
     tauri::Builder::default()
-        .manage(app_state)
+        .setup(|app| {
+            let app_handle = app.handle();
+            let app_state = tauri::async_runtime::block_on(AppState::new(app_handle.clone())); // Added .clone()
+            app.manage(app_state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             add_user,
             create_room,
