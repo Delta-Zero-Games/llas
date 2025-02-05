@@ -81,16 +81,21 @@ impl RoomManager {
     pub fn leave_room(&mut self, room_id: Uuid, user_id: Uuid) -> Result<(), String> {
         let room = self.rooms.get_mut(&room_id).ok_or("Room not found")?;
         room.participants.retain(|p| p.id != user_id);
+        
+        // Clean up peer mapping if exists
         if let Some(user) = self.users.get(&user_id) {
             if let Some(addr) = user.peer_addr {
                 self.peer_mappings.remove(&addr);
             }
         }
-        if room.participants.is_empty() && room.creator_id != user_id {
+    
+        // If room is empty, remove it
+        if room.participants.is_empty() {
             self.rooms.remove(&room_id);
-        } else if room.creator_id == user_id && !room.participants.is_empty() {
-            room.creator_id = room.participants[0].id;
+            println!("Room {} removed as it has no participants", room_id);
+            return Ok(());
         }
+    
         Ok(())
     }
 
@@ -98,6 +103,7 @@ impl RoomManager {
         self.rooms.get(room_id)
     }
 
+    #[allow(dead_code)]
     pub fn list_rooms(&self) -> Vec<Room> {
         self.rooms.values().cloned().collect()
     }
@@ -139,5 +145,17 @@ impl RoomManager {
     // Add this debug helper method
     pub fn get_user(&self, user_id: &Uuid) -> Option<&User> {
         self.users.get(user_id)
+    }
+
+    pub fn sync_room(&mut self, room: Room) {
+        println!("Syncing room from Redis: {}", room.id);
+        // Add any missing users
+        for participant in &room.participants {
+            if !self.users.contains_key(&participant.id) {
+                println!("Syncing user from Redis: {}", participant.id);
+                self.users.insert(participant.id, participant.clone());
+            }
+        }
+        self.rooms.insert(room.id, room);
     }
 }

@@ -91,19 +91,49 @@ async fn create_room(
     name: String,
     user_id: String,
 ) -> Result<Room, String> {
-    let mut manager = state.room_manager.lock().await;
-    let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
-    let room = manager.create_room(name, user_id);
+    println!("Creating room '{}' for user '{}'", name, user_id);
+    
+    let user_id = Uuid::parse_str(&user_id).map_err(|e| {
+        let error = format!("Invalid user UUID: {}", e);
+        state.emit_error("INVALID_UUID", &error);
+        error
+    })?;
 
-    // Persist the new room to Redis
+    // First create the room in memory
+    let room = {
+        let mut manager = state.room_manager.lock().await;
+        manager.create_room(name, user_id)
+    };
+
+    // Then persist it to Redis
     {
         let mut state_mgr = state.state_manager.lock().await;
-        state_mgr.save_room(&room).await.map_err(|e| e.to_string())?;
+        state_mgr.save_room(&room).await.map_err(|e| {
+            let error = format!("Failed to save room to Redis: {}", e);
+            println!("{}", error);
+            state.emit_error("REDIS_ERROR", &error);
+            error
+        })?;
+        println!("Room saved to Redis: {}", room.id);
     }
+
+    // Emit room creation event
+    state.emit_event("room:update", RoomEventPayload {
+        room_id: room.id.to_string(),
+        action: "create".to_string(),
+        participants: room.participants.clone(),
+    });
     
+    println!("Room created successfully: {:?}", room);
     Ok(room)
 }
 
+#[tauri::command]
+async fn cleanup_rooms(state: State<'_, AppState>) -> Result<(), String> {
+    let mut state_mgr = state.state_manager.lock().await;
+    state_mgr.cleanup_stale_rooms().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
     let turn_config = TurnConfig::default();
@@ -143,16 +173,44 @@ async fn join_room(
         error
     })?;
 
-    // Debug: Check if user exists
+    // First check if user exists in memory
     {
         let manager = state.room_manager.lock().await;
-        if let Some(user) = manager.get_user(&user_id) {
-            println!("Found user in backend: {:?}", user);
-        } else {
-            println!("User {} not found in backend", user_id);
+        if manager.get_user(&user_id).is_none() {
+            let error = format!("User {} not found", user_id);
+            println!("{}", error);
+            state.emit_error("USER_NOT_FOUND", &error);
+            return Err(error);
         }
     }
-    
+
+    // Check Redis for room
+    let redis_room = {
+        let mut state_mgr = state.state_manager.lock().await;
+        state_mgr.get_room(&room_id).await.map_err(|e| {
+            let error = format!("Failed to check Redis for room: {}", e);
+            println!("{}", error);
+            error
+        })?
+    };
+
+    // Validate room exists
+    let redis_room = redis_room.ok_or_else(|| {
+        let error = format!("Room {} not found", room_id);
+        println!("{}", error);
+        state.emit_error("ROOM_NOT_FOUND", &error);
+        error
+    })?;
+
+    // Sync room to RoomManager if necessary
+    {
+        let mut manager = state.room_manager.lock().await;
+        if manager.get_room(&room_id).is_none() {
+            println!("Room found in Redis but not in memory, syncing...");
+            manager.sync_room(redis_room);
+        }
+    }
+
     // Initialize network
     if let Err(e) = init_network(&state.network).await {
         state.emit_error("NETWORK_ERROR", &e);
@@ -161,65 +219,34 @@ async fn join_room(
     
     let peer_addr = {
         let network = state.network.lock().await;
-        match network.as_ref().ok_or_else(|| "Network not initialized".to_string())?.get_local_addr() {
-            Ok(addr) => addr,
-            Err(e) => {
-                state.emit_error("NETWORK_ERROR", &e.to_string());
-                return Err(e.to_string());
-            }
-        }
+        network.as_ref()
+            .ok_or_else(|| "Network not initialized".to_string())?
+            .get_local_addr()
+            .map_err(|e| e.to_string())?
     };
 
-    let room = {
+    // Join room and update both memory and Redis
+    let updated_room = {
         let mut manager = state.room_manager.lock().await;
-        
-        // Add peer address
-        if let Err(e) = manager.add_peer_address(user_id, peer_addr) {
-            state.emit_error("PEER_ERROR", &e);
-            return Err(e);
-        }
-        
-        // Join room
-        let room = match manager.join_room(room_id, user_id) {
-            Ok(r) => r,
-            Err(e) => {
-                println!("Failed to join room: {}", e);
-                return Err(e);
-            }
-        };
-        
-        // Update network peers
-        {
-            let mut network = state.network.lock().await;
-            if let Some(net) = network.as_mut() {
-                for participant in &room.participants {
-                    if let Some(participant_addr) = participant.peer_addr {
-                        net.add_peer(participant_addr);
-                    }
-                }
-            }
-        }
-
-        // Emit room update event
-        state.emit_event("room:update", RoomEventPayload {
-            room_id: room.id.to_string(),
-            action: "join".to_string(),
-            participants: room.participants.clone(),
-        });
-
-        room
+        manager.add_peer_address(user_id, peer_addr)?;
+        manager.join_room(room_id, user_id)?
     };
 
-    // Update Redis
+    // Update Redis with new room state
     {
         let mut state_mgr = state.state_manager.lock().await;
-        if let Err(e) = state_mgr.save_room(&room).await {
-            state.emit_error("REDIS_ERROR", &e.to_string());
-            return Err(e.to_string());
-        }
+        state_mgr.save_room(&updated_room).await.map_err(|e| e.to_string())?;
     }
-    
-    Ok(room)
+
+    // Emit room update event
+    state.emit_event("room:update", RoomEventPayload {
+        room_id: updated_room.id.to_string(),
+        action: "join".to_string(),
+        participants: updated_room.participants.clone(),
+    });
+
+    println!("Successfully joined room: {}", room_id);
+    Ok(updated_room)
 }
 
 #[tauri::command]
@@ -414,7 +441,8 @@ fn main() {
             set_user_volume,
             set_input_device,
             set_input_volume,
-            set_muted
+            set_muted,
+            cleanup_rooms
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

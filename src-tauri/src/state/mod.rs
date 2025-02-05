@@ -44,10 +44,21 @@ impl StateManager {
     pub async fn list_rooms(&mut self) -> Result<Vec<Room>, RedisError> {
         let room_ids: Vec<String> = self.conn.smembers("rooms").await?;
         let mut rooms = Vec::new();
-
+    
         for id in room_ids {
             if let Ok(Some(room)) = self.get_room(&Uuid::parse_str(&id).unwrap()).await {
-                rooms.push(room);
+                // Only include rooms that have participants
+                if !room.participants.is_empty() {
+                    rooms.push(room);
+                } else {
+                    // Clean up empty room from Redis
+                    let room_id = Uuid::parse_str(&id).unwrap();
+                    if let Err(e) = self.delete_room(&room_id).await {
+                        println!("Failed to delete empty room from Redis: {}", e);
+                    } else {
+                        println!("Cleaned up empty room {} from Redis", id);
+                    }
+                }
             }
         }
         Ok(rooms)
@@ -66,7 +77,23 @@ impl StateManager {
         Ok(())
     }
 
+    pub async fn cleanup_stale_rooms(&mut self) -> Result<(), RedisError> {
+        let room_ids: Vec<String> = self.conn.smembers("rooms").await?;
+        
+        for id in room_ids {
+            if let Ok(Some(room)) = self.get_room(&Uuid::parse_str(&id).unwrap()).await {
+                // Delete rooms that are empty or have stale test participants
+                if room.participants.is_empty() || room.name == "Test Room" {
+                    println!("Cleaning up stale room: {} ({})", room.name, id);
+                    self.delete_room(&Uuid::parse_str(&id).unwrap()).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Update the participants of a room in Redis.
+    #[allow(dead_code)]
     pub async fn update_room_participants(&mut self, room_id: &Uuid, participants: &[User]) -> Result<(), RedisError> {
         if let Some(mut room) = self.get_room(room_id).await? {
             room.participants = participants.to_vec();
