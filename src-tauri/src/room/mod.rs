@@ -39,11 +39,12 @@ impl RoomManager {
     }
 
     pub fn create_room(&mut self, name: String, creator_id: Uuid) -> Room {
+        let creator = self.users.get(&creator_id).cloned();
         let room = Room {
             id: Uuid::new_v4(),
             name,
             creator_id,
-            participants: Vec::new(),
+            participants: creator.map_or(Vec::new(), |u| vec![u]), // Add creator as first participant
             created_at: Utc::now(),
         };
         self.rooms.insert(room.id, room.clone());
@@ -51,11 +52,29 @@ impl RoomManager {
     }
 
     pub fn join_room(&mut self, room_id: Uuid, user_id: Uuid) -> Result<Room, String> {
-        let room = self.rooms.get_mut(&room_id).ok_or("Room not found")?;
-        let user = self.users.get(&user_id).ok_or("User not found")?;
+        // Get the user first to validate it exists
+        let user = self.users.get(&user_id).ok_or_else(|| {
+            let error_msg = format!("User {} not found in users map", user_id);
+            println!("Join room error: {}", error_msg);
+            println!("Available users: {:?}", self.users.keys().collect::<Vec<_>>());
+            error_msg
+        })?.clone();
+
+        // Get and update the room
+        let room = self.rooms.get_mut(&room_id).ok_or_else(|| {
+            let error_msg = format!("Room {} not found", room_id);
+            println!("Join room error: {}", error_msg);
+            error_msg
+        })?;
+
+        // Check if user is already in the room
         if !room.participants.iter().any(|p| p.id == user_id) {
-            room.participants.push(user.clone());
+            println!("Adding user {} to room {}", user_id, room_id);
+            room.participants.push(user);
+        } else {
+            println!("User {} is already in room {}", user_id, room_id);
         }
+
         Ok(room.clone())
     }
 
@@ -112,7 +131,13 @@ impl RoomManager {
             is_deafened: false,
             peer_addr: None,
         };
+        println!("Adding new user: {:?}", user);
         self.users.insert(user.id, user.clone());
         user
+    }
+
+    // Add this debug helper method
+    pub fn get_user(&self, user_id: &Uuid) -> Option<&User> {
+        self.users.get(user_id)
     }
 }

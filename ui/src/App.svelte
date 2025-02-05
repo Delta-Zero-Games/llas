@@ -1,13 +1,24 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import RoomList from './lib/components/RoomList.svelte';
   import UserList from './lib/components/UserList.svelte';
   import AudioDeviceManager from './lib/components/AudioDeviceManager.svelte';
   import UserSetup from './lib/components/UserSetup.svelte';
+  import NetworkMonitor from './lib/components/NetworkMonitor.svelte';
+  import EventTester from './lib/components/EventTester.svelte';  // Add this
   import { audioStore } from './lib/stores/audioStore';
   import { roomStore } from './lib/stores/roomStore';
   import { userStore } from './lib/stores/userStore';
-  import NetworkMonitor from './lib/components/NetworkMonitor.svelte';
+
+  onMount(async () => {
+    try {
+      await roomStore.initialize();
+      console.log('Room store initialized');
+    } catch (error) {
+      console.error('Failed to initialize room store:', error);
+    }
+  });
 </script>
 
 <main class="h-screen flex flex-col bg-zinc-900">
@@ -15,7 +26,6 @@
   {#if !$userStore.currentUser}
     <UserSetup />
   {/if}
-
   <!-- Header -->
   <header class="bg-zinc-800 shadow-sm">
     <div class="container mx-auto px-4 py-3 flex items-center justify-between">
@@ -73,6 +83,11 @@
     <NetworkMonitor />
   {/if}
   </div>
+  {#if import.meta.env.DEV}
+    <div class="container mx-auto px-4 py-3">
+      <EventTester />
+    </div>
+  {/if}
 </main>
 
 <style>

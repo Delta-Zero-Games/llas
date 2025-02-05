@@ -42,6 +42,14 @@
           "allow": true
         }
       ]
+    },
+    "event": {
+      "capabilities": [
+        {
+          "id": "event:allow",
+          "allow": true
+        }
+      ]
     }
   }
 }

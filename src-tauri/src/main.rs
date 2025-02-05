@@ -80,7 +80,9 @@ impl AppState {
 #[tauri::command]
 async fn add_user(state: State<'_, AppState>, name: String) -> Result<User, String> {
     let mut manager = state.room_manager.lock().await;
-    Ok(manager.add_user(name))
+    let user = manager.add_user(name);
+    println!("User created in backend: {:?}", user);
+    Ok(user)
 }
 
 #[tauri::command]
@@ -125,15 +127,31 @@ async fn join_room(
     room_id: String,
     user_id: String,
 ) -> Result<Room, String> {
+    println!("Join room request - room_id: {}, user_id: {}", room_id, user_id);
+    
     let room_id = Uuid::parse_str(&room_id).map_err(|e| {
-        state.emit_error("INVALID_UUID", &e.to_string());
-        e.to_string()
+        let error = format!("Invalid room UUID: {}", e);
+        println!("{}", error);
+        state.emit_error("INVALID_UUID", &error);
+        error
     })?;
     
     let user_id = Uuid::parse_str(&user_id).map_err(|e| {
-        state.emit_error("INVALID_UUID", &e.to_string());
-        e.to_string()
+        let error = format!("Invalid user UUID: {}", e);
+        println!("{}", error);
+        state.emit_error("INVALID_UUID", &error);
+        error
     })?;
+
+    // Debug: Check if user exists
+    {
+        let manager = state.room_manager.lock().await;
+        if let Some(user) = manager.get_user(&user_id) {
+            println!("Found user in backend: {:?}", user);
+        } else {
+            println!("User {} not found in backend", user_id);
+        }
+    }
     
     // Initialize network
     if let Err(e) = init_network(&state.network).await {
@@ -162,7 +180,13 @@ async fn join_room(
         }
         
         // Join room
-        let room = manager.join_room(room_id, user_id)?;
+        let room = match manager.join_room(room_id, user_id) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("Failed to join room: {}", e);
+                return Err(e);
+            }
+        };
         
         // Update network peers
         {
@@ -197,7 +221,6 @@ async fn join_room(
     
     Ok(room)
 }
-
 
 #[tauri::command]
 async fn leave_room(
