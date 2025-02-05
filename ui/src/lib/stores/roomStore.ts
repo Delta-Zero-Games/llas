@@ -101,6 +101,9 @@ function createRoomStore() {
 
     const setupEventListeners = async () => {
         try {
+            // Add a small delay to ensure Tauri is ready
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
             const roomUnsubscribe = await listen<RoomEventPayload>('room:update', (event) => {
                 update(state => handleRoomEvent(state, event.payload));
             });
@@ -114,8 +117,26 @@ function createRoomStore() {
             });
             eventUnsubscribers.push(errorUnsubscribe);
         } catch (error) {
-            console.error('Failed to setup event listeners:', error);
-            throw error;
+            console.warn('Failed to setup event listeners, will retry:', error);
+            // Instead of throwing, we'll retry once after a delay
+            await new Promise(resolve => setTimeout(resolve, 500));
+            try {
+                const roomUnsubscribe = await listen<RoomEventPayload>('room:update', (event) => {
+                    update(state => handleRoomEvent(state, event.payload));
+                });
+                eventUnsubscribers.push(roomUnsubscribe);
+
+                const errorUnsubscribe = await listen<ErrorEventPayload>('error', (event) => {
+                    update(state => ({
+                        ...state,
+                        error: `${event.payload.code}: ${event.payload.message}`
+                    }));
+                });
+                eventUnsubscribers.push(errorUnsubscribe);
+            } catch (retryError) {
+                console.error('Failed to setup event listeners after retry:', retryError);
+                throw retryError;
+            }
         }
     };
 

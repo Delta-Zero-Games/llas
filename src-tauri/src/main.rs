@@ -399,7 +399,7 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let app_handle = app.handle();
-            let app_state = tauri::async_runtime::block_on(AppState::new(app_handle.clone())); // Added .clone()
+            let app_state = tauri::async_runtime::block_on(AppState::new(app_handle.clone()));
             app.manage(app_state);
             Ok(())
         })

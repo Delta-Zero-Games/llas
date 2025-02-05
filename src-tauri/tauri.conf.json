@@ -16,7 +16,8 @@
         "height": 600,
         "resizable": true,
         "fullscreen": false,
-        "url": "http://localhost:1420"
+        "url": "http://localhost:1420",
+        "label": "main"
       }
     ],
     "security": {
@@ -35,21 +36,10 @@
     ]
   },
   "plugins": {
-    "opener": {
-      "capabilities": [
-        {
-          "id": "opener:allow-default-urls",
-          "allow": true
-        }
-      ]
-    },
-    "event": {
-      "capabilities": [
-        {
-          "id": "event:allow",
-          "allow": true
-        }
-      ]
+    "fs": {
+      "scope": {
+        "allow": ["**"]
+      }
     }
   }
 }

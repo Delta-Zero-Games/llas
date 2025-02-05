@@ -6,17 +6,24 @@
   import AudioDeviceManager from './lib/components/AudioDeviceManager.svelte';
   import UserSetup from './lib/components/UserSetup.svelte';
   import NetworkMonitor from './lib/components/NetworkMonitor.svelte';
-  import EventTester from './lib/components/EventTester.svelte';  // Add this
+  import EventTester from './lib/components/EventTester.svelte';
   import { audioStore } from './lib/stores/audioStore';
   import { roomStore } from './lib/stores/roomStore';
   import { userStore } from './lib/stores/userStore';
 
+  let tauriReady = false;
+
   onMount(async () => {
     try {
+      // Wait a bit for Tauri to initialize
+      await new Promise(resolve => setTimeout(resolve, 500));
+      tauriReady = true;
+      
+      // Now initialize stores
       await roomStore.initialize();
       console.log('Room store initialized');
     } catch (error) {
-      console.error('Failed to initialize room store:', error);
+      console.error('Failed to initialize:', error);
     }
   });
 </script>

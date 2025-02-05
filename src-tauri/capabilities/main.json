@@ -1,0 +1,23 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "main-capability",
+    "description": "Capability for the LLAS main window",
+    "windows": ["main"],
+    "permissions": [
+      "core:default",
+      "window:default",
+      "event:default",
+      "event:allow-listen",
+      "event:allow-emit",
+      "app:default",
+      "app:allow-version",
+      "resources:default",
+      "fs:default",
+      "fs:read-all",
+      "fs:write-all",
+      "dialog:allow-save",
+      "dialog:allow-open",
+      "media:allow-audio"
+    ],
+    "capabilities": []
+}
