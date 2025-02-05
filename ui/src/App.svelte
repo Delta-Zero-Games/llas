@@ -6,7 +6,6 @@
   import AudioDeviceManager from './lib/components/AudioDeviceManager.svelte';
   import UserSetup from './lib/components/UserSetup.svelte';
   import NetworkMonitor from './lib/components/NetworkMonitor.svelte';
-  import EventTester from './lib/components/EventTester.svelte';
   import { audioStore } from './lib/stores/audioStore';
   import { roomStore } from './lib/stores/roomStore';
   import { userStore } from './lib/stores/userStore';
@@ -90,11 +89,6 @@
     <NetworkMonitor />
   {/if}
   </div>
-  {#if import.meta.env.DEV}
-    <div class="container mx-auto px-4 py-3">
-      <EventTester />
-    </div>
-  {/if}
 </main>
 
 <style>

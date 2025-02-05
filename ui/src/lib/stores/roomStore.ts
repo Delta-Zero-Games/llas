@@ -9,7 +9,6 @@ import type { User } from '../types/user';
 export interface Room {
     id: string;
     name: string;
-    creator_id: string;
     participants: User[];
     created_at: string;
 }
@@ -191,11 +190,12 @@ function createRoomStore() {
                         userId 
                     });
                 }
-
+        
                 const room = await invoke<Room>('create_room', { name, userId });
                 const currentUser = get(userStore).currentUser;
                 if (!currentUser) throw new Error('No current user');
                 
+                // Note: We're not adding creator_id here anymore
                 const updatedRoom = {
                     ...room,
                     participants: [{

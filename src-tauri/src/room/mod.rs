@@ -18,7 +18,6 @@ pub struct User {
 pub struct Room {
     pub id: Uuid,
     pub name: String,
-    pub creator_id: Uuid,
     pub participants: Vec<User>,
     pub created_at: DateTime<Utc>,
 }
@@ -43,7 +42,6 @@ impl RoomManager {
         let room = Room {
             id: Uuid::new_v4(),
             name,
-            creator_id,
             participants: creator.map_or(Vec::new(), |u| vec![u]), // Add creator as first participant
             created_at: Utc::now(),
         };
@@ -142,7 +140,6 @@ impl RoomManager {
         user
     }
 
-    // Add this debug helper method
     pub fn get_user(&self, user_id: &Uuid) -> Option<&User> {
         self.users.get(user_id)
     }
