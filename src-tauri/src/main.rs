@@ -313,15 +313,14 @@ async fn start_streaming(
         let mut processor = state.audio_processor.lock().await;
         if processor.is_none() {
             println!("Initializing audio processor");
-            let (audio_tx, _) = mpsc::channel(32); // Create a separate channel for the audio processor
-            *processor = Some(AudioProcessor::new(audio_tx).map_err(|e| e.to_string())?);
+            *processor = Some(AudioProcessor::new(tx.clone()).map_err(|e| e.to_string())?);
             println!("Audio processor initialized successfully");
         }
     }
     
     println!("Setting up processor with channel");
     // Setup processor with the channel
-    setup_processor(&state.audio_processor, tx).await?;
+    setup_processor(&state.audio_processor, tx.clone()).await?;
     println!("Processor setup complete");
     
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
@@ -339,15 +338,7 @@ async fn start_streaming(
 
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
-        for peer_addr in peers {
-            println!("Adding peer: {}", peer_addr);
-            net.add_peer(peer_addr);
-        }
-        println!("Starting audio streaming");
-        net.start_streaming(rx).await;
-        println!("Audio streaming started");
-        
-        // Get the processor reference
+        // First set up the incoming audio handler
         let processor = {
             let guard = state.audio_processor.lock().await;
             guard.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
@@ -355,9 +346,22 @@ async fn start_streaming(
         
         // Create a new Arc<Mutex<AudioProcessor>> for the network
         let network_processor = Arc::new(PLMutex::new(processor));
+        
+        // Add peers
+        for peer_addr in peers {
+            println!("Adding peer: {}", peer_addr);
+            net.add_peer(peer_addr);
+        }
+
+        // Start handling incoming audio first
         println!("Starting to handle incoming audio");
         net.handle_incoming(network_processor).await;
         println!("Handling incoming audio started");
+        
+        // Then start streaming
+        println!("Starting audio streaming");
+        net.start_streaming(rx).await;
+        println!("Audio streaming started");
     }
     
     println!("Streaming setup complete");
@@ -378,8 +382,8 @@ async fn set_input_device(
     state: State<'_, AppState>,
     device_id: String
 ) -> Result<(), String> {
-    let mut processor_lock = state.audio_processor.lock().await;
-    if let Some(proc) = processor_lock.as_mut() {
+    let mut processor = state.audio_processor.lock().await;
+    if let Some(proc) = processor.as_mut() {
         proc.set_input_device(&device_id).await.map_err(|e| e.to_string())?;
     }
     Ok(())

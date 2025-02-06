@@ -29,7 +29,7 @@
         const average = dataArray.reduce((acc, val) => acc + val, 0) / dataArray.length;
         const level = average / 255; // Normalize to 0-1
         
-        audioStore.setInputLevel(level);
+        audioStore.updateInputLevel(level);
         animationFrame = requestAnimationFrame(updateMeter);
       }
       

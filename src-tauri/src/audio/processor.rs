@@ -109,9 +109,15 @@ impl AudioProcessor {
         let mut pcm_data = vec![0f32; 480];
         {
             let mut decoder = self.decoder.blocking_lock();
-            // Pass the data slice directly instead of wrapping in Some(…)
             decoder.decode_float(data, &mut pcm_data, false)?;
         }
+        
+        // Apply volume control
+        let volume = self.output_volume.load(std::sync::atomic::Ordering::Relaxed);
+        for sample in &mut pcm_data {
+            *sample *= volume;
+        }
+        
         if let Some(producer) = &self.output_producer {
             let mut prod = producer.blocking_lock();
             for sample in pcm_data {
@@ -130,31 +136,51 @@ impl AudioProcessor {
     }
 
     pub async fn start_capture(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Starting audio capture");
         let host = cpal::default_host();
         let device = host
             .default_input_device()
             .ok_or("No input device available")?;
+            
+        println!("Using input device: {}", device.name()?);
+        
         let config = cpal::StreamConfig {
             channels: self.channels,
             sample_rate: cpal::SampleRate(self.sample_rate),
             buffer_size: cpal::BufferSize::Fixed(480),
         };
+        
         let tx = self.tx.clone();
         let encoder = self.encoder.clone();
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &_| {
+                static mut PACKET_COUNT: u32 = 0;
                 let mut opus_data = vec![0u8; 1275]; // Maximum opus frame size.
                 let mut enc = encoder.blocking_lock();
-                if let Ok(size) = enc.encode_float(data, &mut opus_data) {
-                    let _ = tx.try_send(opus_data[..size].to_vec());
+                match enc.encode_float(data, &mut opus_data) {
+                    Ok(size) => {
+                        unsafe {
+                            PACKET_COUNT += 1;
+                            if PACKET_COUNT % 100 == 0 {
+                                println!("Captured audio packet #{} ({} bytes)", PACKET_COUNT, size);
+                            }
+                        }
+                        if let Err(e) = tx.try_send(opus_data[..size].to_vec()) {
+                            println!("Failed to send audio data: {}", e);
+                        }
+                    },
+                    Err(e) => println!("Failed to encode audio: {}", e),
                 }
             },
             |err| eprintln!("Audio capture error: {}", err),
             None,
         )?;
+        
+        println!("Built input stream successfully");
         let stream_handle = stream;
         *self.input_stream.lock().await = StreamWrapper(Some(stream_handle));
+        println!("Audio capture started");
         Ok(())
     }
 
@@ -166,14 +192,78 @@ impl AudioProcessor {
         self.output_producer = None;
     }
 
-    pub async fn set_input_device(&mut self, _device_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Drop the current stream first
-        {
-            let mut stream = self.input_stream.lock().await;
-            *stream = StreamWrapper(None);
-        } // stream lock is dropped here
-        // Now we can start capture
-        self.start_capture().await
+    pub async fn set_input_device(&mut self, device_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Setting input device: {}", device_id);
+        let host = cpal::default_host();
+        
+        // List all available devices for debugging
+        println!("Available input devices:");
+        for device in host.input_devices()? {
+            println!("  - ID: {:?}, Name: {}", device.default_input_config(), device.name().unwrap_or_default());
+        }
+        
+        // For now, just use the default input device
+        let device = if device_id == "default" {
+            host.default_input_device()
+                .ok_or("No default input device available")?
+        } else {
+            // Get all input devices and try to find the one with matching ID
+            let mut devices = host.input_devices()?;
+            let found_device = devices.find(|d| {
+                if let Ok(name) = d.name() {
+                    // The device ID from the browser is the raw device name
+                    name == device_id
+                } else {
+                    false
+                }
+            });
+            
+            found_device.unwrap_or_else(|| {
+                println!("Device with ID '{}' not found, falling back to default", device_id);
+                host.default_input_device()
+                    .expect("No default input device available")
+            })
+        };
+        
+        println!("Selected device: {}", device.name().unwrap_or_default());
+        
+        // Stop current stream if any
+        self.cleanup().await;
+        
+        // Create new stream with selected device
+        let config = cpal::StreamConfig {
+            channels: self.channels,
+            sample_rate: cpal::SampleRate(self.sample_rate),
+            buffer_size: cpal::BufferSize::Fixed(480),
+        };
+        
+        let tx = self.tx.clone();
+        let encoder = self.encoder.clone();
+        let stream = device.build_input_stream(
+            &config,
+            move |data: &[f32], _: &_| {
+                let mut opus_data = vec![0u8; 1275];
+                if let Ok(mut enc) = encoder.try_lock() {
+                    match enc.encode_float(data, &mut opus_data) {
+                        Ok(size) => {
+                            if let Err(e) = tx.try_send(opus_data[..size].to_vec()) {
+                                println!("Failed to send audio data: {}", e);
+                            }
+                        },
+                        Err(e) => println!("Failed to encode audio: {}", e),
+                    }
+                } else {
+                    println!("Failed to acquire encoder lock");
+                }
+            },
+            |err| eprintln!("Error in input stream: {}", err),
+            None, // Timeout duration, None means no timeout
+        )?;
+        
+        println!("Successfully built input stream");
+        *self.input_stream.lock().await = StreamWrapper(Some(stream));
+        println!("Set new input stream");
+        Ok(())
     }
 
     pub fn set_input_volume(&self, volume: f32) -> Result<(), Box<dyn std::error::Error>> {

@@ -315,13 +315,16 @@ impl AudioNetwork {
         // Send to all peers through TURN server
         let peers = self.peers.clone();
         if peers.is_empty() {
-            println!("No peers to send audio to");
+            println!("No peers to send audio to. Is anyone else in the room?");
             return Ok(());
         }
 
+        println!("Sending audio packet #{} ({} bytes) to {} peers", sequence, packet.len(), peers.len());
         for peer in peers {
-            println!("Sending {} bytes of audio data to peer {}", packet.len(), peer);
-            self.turn_socket.send_to(&packet, peer).await?;
+            match self.turn_socket.send_to(&packet, peer).await {
+                Ok(_) => println!("Successfully sent audio to peer {}", peer),
+                Err(e) => println!("Failed to send audio to peer {}: {}", peer, e),
+            }
         }
         Ok(())
     }
@@ -386,7 +389,7 @@ impl AudioNetwork {
                             buffer[0], buffer[1], buffer[2], buffer[3]
                         ]);
                         
-                        println!("Received {} bytes from {}, sequence: {}", size, addr, sequence);
+                        println!("Received audio packet #{} ({} bytes) from {}", sequence, size, addr);
 
                         {
                             let mut monitors = qm_clone.lock();
@@ -400,7 +403,10 @@ impl AudioNetwork {
                         }
 
                         let audio_data = &buffer[4..size];
-                        let _ = audio_tx.send((audio_data.to_vec(), addr));
+                        match audio_tx.send((audio_data.to_vec(), addr)) {
+                            Ok(_) => println!("Successfully queued audio data for processing"),
+                            Err(e) => println!("Failed to queue audio data: {}", e),
+                        }
                     }
                     Err(e) => {
                         println!("Error receiving audio packet: {}", e);
@@ -411,10 +417,13 @@ impl AudioNetwork {
 
         // Task to process audio data.
         tokio::spawn(async move {
-            while let Ok((audio_data, _addr)) = audio_rx.recv().await {
+            println!("Started audio processing task");
+            while let Ok((audio_data, addr)) = audio_rx.recv().await {
+                println!("Processing {} bytes of audio data from {}", audio_data.len(), addr);
                 let processor = processor.lock();
-                if let Err(e) = processor.process_incoming(&audio_data) {
-                    eprintln!("Error processing audio: {}", e);
+                match processor.process_incoming(&audio_data) {
+                    Ok(_) => println!("Successfully processed audio data"),
+                    Err(e) => println!("Error processing audio: {}", e),
                 }
             }
         });

@@ -228,70 +228,88 @@ function createRoomStore() {
         },
 
         async joinRoom(roomId: string, userId: string) {
-          console.log('Attempting to join room:', { roomId, userId });
-          update(state => ({ ...state, isLoading: true, error: null }));
-          try {
-              const currentState = get({ subscribe });
-              if (currentState.currentRoom) {
-                  console.log('Leaving current room before joining new one');
-                  await invoke('leave_room', { 
-                      roomId: currentState.currentRoom.id, 
-                      userId 
-                  });
-              }
-      
-              console.log('Invoking join_room command');
-              const result = await invoke<Room>('join_room', { roomId, userId });
-              console.log('Join room command result:', result);
-      
-              const currentUser = get(userStore).currentUser;
-              if (!currentUser) {
-                  throw new Error('No current user found when trying to join room');
-              }
-      
-              update(state => {
-                  console.log('Updating store with new room state');
-                  const updatedRooms = state.rooms.map(r => r.id === roomId ? {
-                      ...r,
-                      participants: [
-                          ...r.participants.filter(p => p.id !== userId),
-                          {
-                              id: userId,
-                              name: currentUser.name,
-                              is_muted: false,
-                              is_deafened: false,
-                              volume: 1
-                          }
-                      ]
-                  } : r);
-      
-                  const targetRoom = updatedRooms.find(r => r.id === roomId);
-                  if (!targetRoom) {
-                      console.warn('Target room not found after update');
-                  }
-                  return {
-                      ...state,
-                      rooms: filterEmptyRooms(updatedRooms),
-                      currentRoom: targetRoom || null,
-                      error: null,
-                      isLoading: false,
-                  };
-              });
-          } catch (err) {
-              console.error('Failed to join room:', err);
-              const errorMessage = err instanceof Error ? err.message : 'Failed to join room';
-              update(state => ({
-                  ...state,
-                  error: errorMessage,
-                  isLoading: false,
-              }));
-              throw new Error(errorMessage);
-          }
-      },
+            console.log('Attempting to join room:', { roomId, userId });
+            update(state => ({ ...state, isLoading: true, error: null }));
+            try {
+                const currentState = get({ subscribe });
+                if (currentState.currentRoom) {
+                    console.log('Leaving current room before joining new one');
+                    await invoke('leave_room', { 
+                        roomId: currentState.currentRoom.id, 
+                        userId 
+                    });
+                }
+        
+                console.log('Invoking join_room command');
+                const result = await invoke<Room>('join_room', { roomId, userId });
+                console.log('Join room command result:', result);
+        
+                const currentUser = get(userStore).currentUser;
+                if (!currentUser) {
+                    throw new Error('No current user found when trying to join room');
+                }
+  
+                // Start audio streaming after successfully joining the room
+                try {
+                    console.log('Starting audio streaming for room:', roomId);
+                    await invoke('start_streaming', { roomId });
+                } catch (streamErr) {
+                    console.error('Failed to start audio streaming:', streamErr);
+                    // Don't throw here, we still want to join the room even if streaming fails
+                }
+        
+                update(state => {
+                    console.log('Updating store with new room state');
+                    const updatedRooms = state.rooms.map(r => r.id === roomId ? {
+                        ...r,
+                        participants: [
+                            ...r.participants.filter(p => p.id !== userId),
+                            {
+                                id: userId,
+                                name: currentUser.name,
+                                is_muted: false,
+                                is_deafened: false,
+                                volume: 1
+                            }
+                        ]
+                    } : r);
+        
+                    const targetRoom = updatedRooms.find(r => r.id === roomId);
+                    if (!targetRoom) {
+                        console.warn('Target room not found after update');
+                    }
+                    return {
+                        ...state,
+                        rooms: filterEmptyRooms(updatedRooms),
+                        currentRoom: targetRoom || null,
+                        error: null,
+                        isLoading: false,
+                    };
+                });
+            } catch (err) {
+                console.error('Failed to join room:', err);
+                const errorMessage = err instanceof Error ? err.message : 'Failed to join room';
+                update(state => ({
+                    ...state,
+                    error: errorMessage,
+                    isLoading: false,
+                }));
+                throw new Error(errorMessage);
+            }
+        },
 
         async leaveRoom(roomId: string, userId: string) {
             update(state => ({ ...state, isLoading: true, error: null }));
             try {
+                // Stop audio streaming before leaving the room
+                try {
+                    console.log('Stopping audio streaming');
+                    await invoke('stop_streaming');
+                } catch (streamErr) {
+                    console.error('Failed to stop audio streaming:', streamErr);
+                    // Don't throw here, we still want to leave the room
+                }
+
                 await invoke('leave_room', { roomId, userId });
                 
                 update(state => ({
@@ -299,12 +317,14 @@ function createRoomStore() {
                     rooms: filterEmptyRooms(
                         state.rooms.map(room => ({
                             ...room,
-                            participants: room.participants.filter(p => p.id !== userId)
+                            participants: room.id === roomId
+                                ? room.participants.filter(p => p.id !== userId)
+                                : room.participants
                         }))
                     ),
-                    currentRoom: null,
-                    error: null,
+                    currentRoom: state.currentRoom?.id === roomId ? null : state.currentRoom,
                     isLoading: false,
+                    error: null
                 }));
             } catch (err) {
                 const errorMessage = err instanceof Error ? err.message : 'Failed to leave room';
