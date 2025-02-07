@@ -1,5 +1,5 @@
 // ui/src/lib/stores/networkStore.ts
-import { writable, get } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -9,6 +9,21 @@ export interface NetworkStats {
   jitter: number;
   bufferSize: number;
   connectionQuality: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Critical';
+}
+
+interface RustDuration {
+  secs: number;
+  nanos: number;
+}
+
+interface NetworkStatsEvent {
+  peer: string;
+  stats: {
+    latency: RustDuration;
+    packet_loss: number;
+    jitter: RustDuration;
+    connection_quality: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Critical';
+  };
 }
 
 export interface NetworkState {
@@ -33,6 +48,63 @@ const initialState: NetworkState = {
 
 function createNetworkStore() {
   const { subscribe, set, update } = writable<NetworkState>(initialState);
+  let eventUnsubscribers: (() => void)[] = [];
+
+  // Helper to convert Rust Duration to milliseconds
+  const durationToMs = (duration: RustDuration): number => {
+    return duration.secs * 1000 + duration.nanos / 1_000_000;
+  };
+
+  // Set up event listeners
+  async function setupEventListeners() {
+    try {
+      // Network stats listener
+      const statsUnsubscribe = await listen<NetworkStatsEvent>('network:stats', (event) => {
+        const { stats } = event.payload;
+        update(state => ({
+          ...state,
+          stats: {
+            ...state.stats,
+            latency: durationToMs(stats.latency),
+            jitter: durationToMs(stats.jitter),
+            packetLoss: stats.packet_loss,
+            connectionQuality: stats.connection_quality,
+          }
+        }));
+      });
+      eventUnsubscribers.push(statsUnsubscribe);
+
+      // Connection status listener
+      const statusUnsubscribe = await listen<{ connected: boolean }>('network:status', (event) => {
+        update(state => ({
+          ...state,
+          isConnected: event.payload.connected
+        }));
+      });
+      eventUnsubscribers.push(statusUnsubscribe);
+
+      // Error listener
+      const errorUnsubscribe = await listen<{ error: string }>('network:error', (event) => {
+        update(state => ({
+          ...state,
+          error: event.payload.error
+        }));
+      });
+      eventUnsubscribers.push(errorUnsubscribe);
+
+    } catch (error) {
+      console.error('Failed to setup network event listeners:', error);
+    }
+  }
+
+  // Clean up function
+  function cleanup() {
+    eventUnsubscribers.forEach(unsubscribe => unsubscribe());
+    eventUnsubscribers = [];
+  }
+
+  // Initialize listeners
+  setupEventListeners();
 
   return {
     subscribe,
@@ -60,7 +132,7 @@ function createNetworkStore() {
           isConnected: false,
           error: error instanceof Error ? error.message : 'Failed to start streaming'
         }));
-        throw error; // Re-throw to let components handle it
+        throw error;
       }
     },
 
@@ -91,7 +163,15 @@ function createNetworkStore() {
     setError: (error: string | null) =>
       update(state => ({ ...state, error })),
 
-    reset: () => set(initialState)
+    reset: () => {
+      cleanup();
+      set(initialState);
+    },
+
+    initialize: async () => {
+      cleanup();
+      await setupEventListeners();
+    }
   };
 }
 

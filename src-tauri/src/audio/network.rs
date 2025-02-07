@@ -13,6 +13,8 @@ use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
 
 // Constants for TURN
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
@@ -36,13 +38,13 @@ pub struct NetworkStats {
     pub connection_quality: ConnectionQuality,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum ConnectionQuality {
-    Excellent,  // < 50ms latency, < 1% packet loss
-    Good,       // < 100ms latency, < 2% packet loss
-    Fair,       // < 150ms latency, < 5% packet loss
-    Poor,       // < 200ms latency, < 10% packet loss
-    Critical,   // >= 200ms latency or >= 10% packet loss
+    Excellent,
+    Good,
+    Fair,
+    Poor,
+    Critical,
 }
 
 #[derive(Clone)]
@@ -302,10 +304,11 @@ pub struct AudioNetwork {
     jitter_buffers: HashMap<SocketAddr, JitterBuffer>,
     quality_monitors: HashMap<SocketAddr, QualityMonitor>,
     stats_tx: broadcast::Sender<(SocketAddr, NetworkStats)>,
+    app_handle: AppHandle,
 }
 
 impl AudioNetwork {
-    pub async fn new(bind_addr: &str, turn_config: TurnConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(bind_addr: &str, turn_config: TurnConfig, app_handle: AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         // Bind a UDP socket.
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.set_ttl(32)?;
@@ -329,6 +332,7 @@ impl AudioNetwork {
             jitter_buffers: HashMap::new(),
             quality_monitors: HashMap::new(),
             stats_tx,
+            app_handle,
         })
     }
 
@@ -481,6 +485,7 @@ impl AudioNetwork {
         let jitter_buffers = Arc::new(Mutex::new(self.jitter_buffers.clone()));
         let quality_monitors = Arc::new(Mutex::new(self.quality_monitors.clone()));
         let stats_tx = self.stats_tx.clone();
+        let app_handle = self.app_handle.clone();
     
         // Task to handle incoming packets.
         let jb_clone = jitter_buffers.clone();
@@ -495,20 +500,41 @@ impl AudioNetwork {
                             println!("Received packet too small: {} bytes from {}", size, addr);
                             continue;
                         }
-    
+
                         let sequence = u32::from_be_bytes([
                             buffer[0], buffer[1], buffer[2], buffer[3]
                         ]);
                         
                         println!("Received audio packet #{} ({} bytes) from {}", sequence, size, addr);
-    
-                        // Update quality monitor
+
+                        // Update quality monitor and emit stats
                         {
                             let mut monitors = qm_clone.lock();
                             if let Some(monitor) = monitors.get_mut(&addr) {
                                 monitor.update(sequence, Instant::now());
                                 let stats = monitor.get_stats();
                                 let _ = stats_tx.send((addr, stats.clone()));
+    
+                                let stats_payload = json!({
+                                    "peer": addr.to_string(),
+                                    "stats": {
+                                        "latency": {
+                                            "secs": stats.latency.as_secs(),
+                                            "nanos": stats.latency.subsec_nanos(),
+                                        },
+                                        "packet_loss": stats.packet_loss,
+                                        "jitter": {
+                                            "secs": stats.jitter.as_secs(),
+                                            "nanos": stats.jitter.subsec_nanos(),
+                                        },
+                                        "connection_quality": stats.connection_quality,
+                                    }
+                                });
+    
+                                if let Err(e) = app_handle.emit("network:stats", stats_payload) {
+                                    println!("Failed to emit network stats: {}", e);
+                                }
+    
                                 println!("Network stats for {}: latency={:?}, packet_loss={:.2}%, jitter={:?}", 
                                     addr, stats.latency, stats.packet_loss * 100.0, stats.jitter);
                             }
@@ -558,7 +584,7 @@ impl AudioNetwork {
     pub fn new_sync() -> Result<Self, Box<dyn std::error::Error>> {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async {
-            Self::new("0.0.0.0:0", TurnConfig::default()).await
+            Err("new_sync() is not supported - use new() with an app_handle instead".into())
         })
     }
 

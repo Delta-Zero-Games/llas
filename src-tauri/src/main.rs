@@ -6,7 +6,7 @@ mod state;
 mod config;
 mod audio;
 
-use tauri::{State, Manager, Emitter};
+use tauri::{State, Manager, Emitter, AppHandle};
 use std::sync::Arc;
 use tokio::sync::Mutex; 
 use uuid::Uuid;
@@ -135,7 +135,7 @@ async fn cleanup_rooms(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
+async fn init_network(network: &SafeAudioNetwork, app_handle: AppHandle) -> Result<(), String> {
     let turn_config = TurnConfig::default();
     println!("Initializing with TURN config:");
     println!("URL: {}", turn_config.url);
@@ -143,7 +143,7 @@ async fn init_network(network: &SafeAudioNetwork) -> Result<(), String> {
     println!("Realm: {}", turn_config.realm);
     let mut network_lock = network.lock().await;
     if network_lock.is_none() {
-        let new_network = AudioNetwork::new("0.0.0.0:0", turn_config)
+        let new_network = AudioNetwork::new("0.0.0.0:0", turn_config, app_handle)
             .await
             .map_err(|e| e.to_string())?;
         *network_lock = Some(new_network);
@@ -212,7 +212,7 @@ async fn join_room(
     }
 
     // Initialize network
-    if let Err(e) = init_network(&state.network).await {
+    if let Err(e) = init_network(&state.network, state.app_handle.clone()).await {
         state.emit_error("NETWORK_ERROR", &e);
         return Err(e);
     }
@@ -333,7 +333,7 @@ async fn start_streaming(
 
     // Initialize network if not already initialized
     println!("Initializing network");
-    init_network(&state.network).await?;
+    init_network(&state.network, state.app_handle.clone()).await?;
     println!("Network initialized");
 
     let mut network = state.network.lock().await;
