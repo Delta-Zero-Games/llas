@@ -12,6 +12,7 @@ use crate::config::TurnConfig;
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
 
 // Constants for TURN
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
@@ -20,6 +21,12 @@ const XOR_MAPPED_ADDRESS: u16 = 0x0016;
 const LIFETIME: u16 = 0x000D;
 const REALM_ATTR: u16 = 0x0014;
 const NONCE_ATTR: u16 = 0x0015;
+
+// Constants for JitterBuffer
+const MIN_JITTER_DELAY_MS: u32 = 20;  // Minimum buffer delay
+const MAX_JITTER_DELAY_MS: u32 = 50;  // Maximum buffer delay
+const TARGET_JITTER_MS: u32 = 30;     // Target delay
+const PACKET_HISTORY: usize = 100;    // Number of packets to track for statistics
 
 #[derive(Debug, Clone)]
 pub struct NetworkStats {
@@ -142,51 +149,147 @@ impl QualityMonitor {
 
 #[derive(Clone)]
 pub struct JitterBuffer {
-    buffer: VecDeque<(u32, Vec<u8>)>,
-    min_delay: u32,
-    max_delay: u32,
+    // Buffer stores audio packets ordered by sequence number
+    buffer: BTreeMap<u32, Vec<u8>>,
+    // Track when packets were received for timing analysis
+    packet_times: BTreeMap<u32, Instant>,
+    // Current delay target in milliseconds
     current_delay: u32,
+    // Last sequence number played
     last_sequence: u32,
+    // Stats for delay adjustment
+    variance_sum: f32,
+    variance_count: u32,
+    // Track packet loss
+    expected_sequence: u32,
+    lost_packets: u32,
+    total_packets: u32,
 }
 
 impl JitterBuffer {
-    fn new(min_delay: u32, max_delay: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            buffer: VecDeque::new(),
-            min_delay,
-            max_delay,
-            current_delay: min_delay,
+            buffer: BTreeMap::new(),
+            packet_times: BTreeMap::new(),
+            current_delay: TARGET_JITTER_MS,
             last_sequence: 0,
+            variance_sum: 0.0,
+            variance_count: 0,
+            expected_sequence: 0,
+            lost_packets: 0,
+            total_packets: 0,
         }
     }
 
-    fn add_packet(&mut self, sequence: u32, data: Vec<u8>) {
-        let pos = self.buffer.iter()
-            .position(|(seq, _)| *seq > sequence)
-            .unwrap_or(self.buffer.len());
-        self.buffer.insert(pos, (sequence, data));
+    /// Add a packet to the jitter buffer
+    pub fn add_packet(&mut self, sequence: u32, data: Vec<u8>) {
+        let now = Instant::now();
+        
+        // Update packet loss statistics
+        if self.total_packets > 0 {
+            let expected = self.expected_sequence.wrapping_add(1);
+            if sequence > expected {
+                self.lost_packets += sequence - expected;
+            }
+        }
+        self.expected_sequence = sequence;
+        self.total_packets += 1;
+
+        // Store packet and its arrival time
+        self.buffer.insert(sequence, data);
+        self.packet_times.insert(sequence, now);
+
+        // Update delay based on timing variance
         self.adapt_delay(sequence);
+
+        // Clean up old packets from the timing map
+        self.cleanup_old_packets();
     }
 
-    fn get_next_packet(&mut self) -> Option<Vec<u8>> {
-        if self.buffer.len() as u32 * 10 < self.current_delay {
+    /// Get the next packet if it's ready to be played
+    pub fn get_next_packet(&mut self) -> Option<Vec<u8>> {
+        if self.buffer.is_empty() {
             return None;
         }
-        let (seq, data) = self.buffer.pop_front()?;
-        self.last_sequence = seq;
-        Some(data)
+
+        // Get the oldest packet in the buffer
+        let (&sequence, _) = self.buffer.iter().next()?;
+        let arrival_time = self.packet_times.get(&sequence)?;
+
+        // Check if we've buffered long enough
+        if arrival_time.elapsed() < Duration::from_millis(self.current_delay as u64) {
+            return None;
+        }
+
+        // Remove and return the packet
+        let packet = self.buffer.remove(&sequence)?;
+        self.packet_times.remove(&sequence);
+        self.last_sequence = sequence;
+
+        Some(packet)
     }
 
+    /// Adapt buffer delay based on network conditions
     fn adapt_delay(&mut self, sequence: u32) {
-        if sequence > self.last_sequence {
-            let jitter = sequence - self.last_sequence - 1;
-            if jitter > 0 {
-                self.current_delay = (self.current_delay + jitter).min(self.max_delay);
-            } else {
-                self.current_delay = (self.current_delay - 1).max(self.min_delay);
+        if let Some(&arrival_time) = self.packet_times.get(&sequence) {
+            // Calculate packet timing variance
+            if let Some(&prev_arrival) = self.packet_times.get(&sequence.saturating_sub(1)) {
+                let expected_interval = Duration::from_millis(10); // 10ms packet interval
+                let actual_interval = arrival_time.duration_since(prev_arrival);
+                let variance = (actual_interval.as_secs_f32() - expected_interval.as_secs_f32()).abs();
+
+                // Update running variance
+                self.variance_sum += variance;
+                self.variance_count += 1;
+
+                // Adjust delay every 50 packets
+                if self.variance_count >= 50 {
+                    let avg_variance = self.variance_sum / self.variance_count as f32;
+                    let target_delay = (avg_variance * 1000.0 * 2.0) as u32; // Double the average variance
+
+                    // Clamp to min/max and update
+                    self.current_delay = target_delay
+                        .clamp(MIN_JITTER_DELAY_MS, MAX_JITTER_DELAY_MS);
+
+                    // Reset variance tracking
+                    self.variance_sum = 0.0;
+                    self.variance_count = 0;
+                }
             }
         }
     }
+
+    /// Clean up old packet timing data
+    fn cleanup_old_packets(&mut self) {
+        while self.packet_times.len() > PACKET_HISTORY {
+            if let Some((&sequence, _)) = self.packet_times.iter().next() {
+                self.packet_times.remove(&sequence);
+            }
+        }
+    }
+
+    /// Get current statistics
+    pub fn get_stats(&self) -> JitterStats {
+        let packet_loss = if self.total_packets > 0 {
+            self.lost_packets as f32 / self.total_packets as f32
+        } else {
+            0.0
+        };
+
+        JitterStats {
+            current_delay: self.current_delay,
+            buffer_size: self.buffer.len(),
+            packet_loss,
+        }
+    }
+}
+
+/// Statistics about the jitter buffer state
+#[derive(Debug, Clone)]
+pub struct JitterStats {
+    pub current_delay: u32,
+    pub buffer_size: usize,
+    pub packet_loss: f32,
 }
 
 pub struct AudioNetwork {
@@ -194,7 +297,7 @@ pub struct AudioNetwork {
     turn_socket: Arc<UdpSocket>,
     peers: Vec<SocketAddr>,
     buffer_size: usize,
-    sequence: std::sync::atomic::AtomicU32,
+    sequence: Arc<std::sync::atomic::AtomicU32>,
     audio_tx: broadcast::Sender<(Vec<u8>, SocketAddr)>,
     jitter_buffers: HashMap<SocketAddr, JitterBuffer>,
     quality_monitors: HashMap<SocketAddr, QualityMonitor>,
@@ -221,7 +324,7 @@ impl AudioNetwork {
             turn_socket: Arc::new(turn_socket),
             peers: Vec::new(),
             buffer_size: 480,
-            sequence: std::sync::atomic::AtomicU32::new(0),
+            sequence: Arc::new(std::sync::atomic::AtomicU32::new(0)),  // Create with Arc
             audio_tx,
             jitter_buffers: HashMap::new(),
             quality_monitors: HashMap::new(),
@@ -308,17 +411,23 @@ impl AudioNetwork {
 
     pub async fn send_audio(&mut self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         let sequence = self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut packet = Vec::with_capacity(data.len() + 4);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+    
+        // Create packet: [sequence(4)] [timestamp(8)] [data(..)]
+        let mut packet = Vec::with_capacity(data.len() + 12);
         packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(&timestamp.to_be_bytes());
         packet.extend_from_slice(data);
-
+    
         // Send to all peers through TURN server
         let peers = self.peers.clone();
         if peers.is_empty() {
             println!("No peers to send audio to. Is anyone else in the room?");
             return Ok(());
         }
-
+    
         println!("Sending audio packet #{} ({} bytes) to {} peers", sequence, packet.len(), peers.len());
         for peer in peers {
             match self.turn_socket.send_to(&packet, peer).await {
@@ -332,7 +441,7 @@ impl AudioNetwork {
     pub fn add_peer(&mut self, addr: SocketAddr) {
         if !self.peers.contains(&addr) {
             self.peers.push(addr);
-            self.jitter_buffers.insert(addr, JitterBuffer::new(20, 50));
+            self.jitter_buffers.insert(addr, JitterBuffer::new());  // Remove parameters
             self.quality_monitors.insert(addr, QualityMonitor::new());
         }
     }
@@ -345,11 +454,13 @@ impl AudioNetwork {
     pub async fn start_streaming(&mut self, mut rx: mpsc::Receiver<Vec<u8>>) {
         let socket = self.turn_socket.clone();
         let peers = self.peers.clone();
+        let sequence = self.sequence.clone();
         tokio::spawn(async move {
             while let Some(audio_data) = rx.recv().await {
                 for peer in &peers {
                     let mut packet = BytesMut::with_capacity(audio_data.len() + 12);
-                    packet.put_u32(0);
+                    let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    packet.put_u32(seq);
                     packet.put_u64(std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -370,9 +481,9 @@ impl AudioNetwork {
         let jitter_buffers = Arc::new(Mutex::new(self.jitter_buffers.clone()));
         let quality_monitors = Arc::new(Mutex::new(self.quality_monitors.clone()));
         let stats_tx = self.stats_tx.clone();
-
+    
         // Task to handle incoming packets.
-        let _jb_clone = jitter_buffers.clone();
+        let jb_clone = jitter_buffers.clone();
         let qm_clone = quality_monitors.clone();
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 2048];
@@ -384,13 +495,14 @@ impl AudioNetwork {
                             println!("Received packet too small: {} bytes from {}", size, addr);
                             continue;
                         }
-
+    
                         let sequence = u32::from_be_bytes([
                             buffer[0], buffer[1], buffer[2], buffer[3]
                         ]);
                         
                         println!("Received audio packet #{} ({} bytes) from {}", sequence, size, addr);
-
+    
+                        // Update quality monitor
                         {
                             let mut monitors = qm_clone.lock();
                             if let Some(monitor) = monitors.get_mut(&addr) {
@@ -401,11 +513,21 @@ impl AudioNetwork {
                                     addr, stats.latency, stats.packet_loss * 100.0, stats.jitter);
                             }
                         }
-
-                        let audio_data = &buffer[4..size];
-                        match audio_tx.send((audio_data.to_vec(), addr)) {
-                            Ok(_) => println!("Successfully queued audio data for processing"),
-                            Err(e) => println!("Failed to queue audio data: {}", e),
+    
+                        // Add to jitter buffer
+                        {
+                            let mut jitter_buffers = jb_clone.lock();
+                            if let Some(jitter_buffer) = jitter_buffers.get_mut(&addr) {
+                                jitter_buffer.add_packet(sequence, buffer[4..size].to_vec());
+                                
+                                // Process packets that are ready
+                                while let Some(ready_data) = jitter_buffer.get_next_packet() {
+                                    match audio_tx.send((ready_data, addr)) {
+                                        Ok(_) => println!("Successfully queued audio data for processing"),
+                                        Err(e) => println!("Failed to queue audio data: {}", e),
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -414,7 +536,7 @@ impl AudioNetwork {
                 }
             }
         });
-
+    
         // Task to process audio data.
         tokio::spawn(async move {
             println!("Started audio processing task");

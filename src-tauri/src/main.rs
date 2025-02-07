@@ -396,7 +396,7 @@ async fn set_input_volume(
 ) -> Result<(), String> {
     let mut processor_lock = state.audio_processor.lock().await;
     if let Some(proc) = processor_lock.as_mut() {
-        proc.set_input_volume(volume).map_err(|e| e.to_string())?;
+        proc.set_input_volume(volume);
     }
     Ok(())
 }
