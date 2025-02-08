@@ -17,6 +17,7 @@ use crate::state::StateManager;
 use tokio::sync::mpsc;
 use parking_lot::Mutex as PLMutex;
 use serde::Serialize;
+use serde_json::json;
 
 type SafeAudioProcessor = Arc<Mutex<Option<AudioProcessor>>>;
 type SafeAudioNetwork = Arc<Mutex<Option<AudioNetwork>>>;
@@ -336,6 +337,10 @@ async fn start_streaming(
     init_network(&state.network, state.app_handle.clone()).await?;
     println!("Network initialized");
 
+    // Emit connected status
+    state.app_handle.emit("audio:status", json!({ "connected": true }))
+        .map_err(|e| e.to_string())?;
+
     let mut network = state.network.lock().await;
     if let Some(net) = network.as_mut() {
         // First set up the incoming audio handler
@@ -374,6 +379,10 @@ async fn stop_streaming(state: State<'_, AppState>) -> Result<(), String> {
     let mut processor = state.audio_processor.lock().await;
     *network = None;
     *processor = None;
+    // Emit disconnected status
+    state.app_handle.emit("audio:status", json!({ "connected": false }))
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 

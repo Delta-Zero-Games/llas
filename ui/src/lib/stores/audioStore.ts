@@ -1,6 +1,7 @@
 // ui/src/lib/stores/audioStore.ts
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type Event } from '@tauri-apps/api/event';
 
 export interface AudioState {
   inputDevice: MediaDeviceInfo | null;
@@ -26,6 +27,14 @@ const initialState: AudioState = {
   error: null
 };
 
+interface AudioStatusEvent {
+  connected: boolean;
+}
+
+interface AudioErrorEvent {
+  error: string;
+}
+
 function createAudioStore() {
   const { subscribe, set, update } = writable<AudioState>(initialState);
 
@@ -35,18 +44,59 @@ function createAudioStore() {
     startStreaming: async (roomId: string) => {
       try {
         await invoke('start_streaming', { roomId });
-        update(state => ({ ...state, isConnected: true, error: null }));
+        update(state => ({ 
+          ...state, 
+          isConnected: true, 
+          error: null 
+        }));
       } catch (err) {
-        update(state => ({ ...state, error: err instanceof Error ? err.message : 'Failed to start streaming' }));
+        update(state => ({
+          ...state,
+          isConnected: false,
+          error: err instanceof Error ? err.message : 'Failed to start streaming'
+        }));
+        throw err;
       }
     },
 
     stopStreaming: async () => {
       try {
         await invoke('stop_streaming');
-        update(state => ({ ...state, isConnected: false, error: null }));
+        update(state => ({
+          ...state,
+          isConnected: false,
+          currentRoomId: null,
+          error: null
+        }));
       } catch (err) {
-        update(state => ({ ...state, error: err instanceof Error ? err.message : 'Failed to stop streaming' }));
+        console.error('Failed to stop streaming:', err);
+        update(state => ({
+          ...state,
+          error: err instanceof Error ? err.message : 'Failed to stop streaming'
+        }));
+      }
+    },
+
+    // Add event listener setup
+    initialize: async () => {
+      try {
+        // Listen for audio connection status events
+        await listen<AudioStatusEvent>('audio:status', (event: Event<AudioStatusEvent>) => {
+          update(state => ({
+            ...state,
+            isConnected: event.payload.connected
+          }));
+        });
+
+        // Listen for audio errors
+        await listen<AudioErrorEvent>('audio:error', (event: Event<AudioErrorEvent>) => {
+          update(state => ({
+            ...state,
+            error: event.payload.error
+          }));
+        });
+      } catch (error) {
+        console.error('Failed to initialize audio event listeners:', error);
       }
     },
 

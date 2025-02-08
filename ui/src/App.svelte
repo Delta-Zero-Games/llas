@@ -18,9 +18,10 @@
       await new Promise(resolve => setTimeout(resolve, 500));
       tauriReady = true;
       
-      // Now initialize stores
+      // Initialize stores
       await roomStore.initialize();
-      console.log('Room store initialized');
+      await audioStore.initialize();  // Add this line
+      console.log('Stores initialized');
     } catch (error) {
       console.error('Failed to initialize:', error);
     }
