@@ -259,6 +259,9 @@ async fn leave_room(
     let room_id = Uuid::parse_str(&room_id).map_err(|e| e.to_string())?;
     let user_id = Uuid::parse_str(&user_id).map_err(|e| e.to_string())?;
 
+    // Stop streaming first
+    stop_streaming(state.clone()).await?;
+
     // Remove the user from the room in memory
     {
         let mut manager = state.room_manager.lock().await;
@@ -266,17 +269,19 @@ async fn leave_room(
         
         // Use the public getter method to check if the room still exists.
         if let Some(room) = manager.get_room(&room_id) {
-            // Update the room’s participant list in Redis.
-            // (Cloning the room might be necessary if you run into lifetime issues.)
             let room_clone = room.clone();
             let mut state_mgr = state.state_manager.lock().await;
             state_mgr.save_room(&room_clone).await.map_err(|e| e.to_string())?;
         } else {
-            // If the room was removed, delete it from Redis.
             let mut state_mgr = state.state_manager.lock().await;
             state_mgr.delete_room(&room_id).await.map_err(|e| e.to_string())?;
         }
     }
+
+    // Emit disconnected status
+    state.app_handle.emit("audio:status", json!({ "connected": false }))
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
