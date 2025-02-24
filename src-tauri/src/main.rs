@@ -309,18 +309,25 @@ async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<Room>, String> {
 }
 
 
+// Fixed setup_processor function to avoid Send issues with futures
 async fn setup_processor(processor: &SafeAudioProcessor, tx: mpsc::Sender<Vec<u8>>) -> Result<(), String> {
-    let mut processor_lock = processor.lock().await;
-    if processor_lock.is_none() {
-        *processor_lock = Some(AudioProcessor::new(tx).map_err(|e| e.to_string())?);
+    // Initialize the processor if needed
+    {
+        let mut processor_lock = processor.lock().await;
+        if processor_lock.is_none() {
+            *processor_lock = Some(AudioProcessor::new(tx.clone()).map_err(|e| e.to_string())?);
+        }
     }
 
-    // Get a reference to the processor
-    let processor_ref = processor_lock.as_mut().ok_or_else(|| "Processor not initialized".to_string())?;
+    // Get a mutable clone of the processor to avoid holding the lock during await points
+    let mut processor_clone = {
+        let processor_lock = processor.lock().await;
+        processor_lock.as_ref().ok_or_else(|| "Processor not initialized".to_string())?.clone()
+    };
     
-    // Setup streams
-    processor_ref.setup_output_stream().await.map_err(|e| e.to_string())?;
-    processor_ref.start_capture().await.map_err(|e| e.to_string())
+    // Setup streams with the clone - this avoids the Send issues
+    processor_clone.setup_output_stream().await.map_err(|e| e.to_string())?;
+    processor_clone.start_capture().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

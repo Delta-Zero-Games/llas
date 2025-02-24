@@ -249,14 +249,9 @@ function createRoomStore() {
                     throw new Error('No current user found when trying to join room');
                 }
   
-                // Start audio streaming after successfully joining the room
-                try {
-                    console.log('Starting audio streaming for room:', roomId);
-                    await invoke('start_streaming', { roomId });
-                } catch (streamErr) {
-                    console.error('Failed to start audio streaming:', streamErr);
-                    // Don't throw here, we still want to join the room even if streaming fails
-                }
+                // We don't start audio streaming here anymore
+                // This is now handled in the UI component after successful room join
+                console.log('Room joined successfully');
         
                 update(state => {
                     console.log('Updating store with new room state');

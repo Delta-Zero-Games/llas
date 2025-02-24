@@ -5,7 +5,7 @@ use serde_json;
 use crate::room::{Room, User};
 use uuid::Uuid;
 use crate::config::RedisConfig;
-use chrono::{DateTime, Utc, Duration};
+use chrono::{Utc, Duration};
 
 pub struct StateManager {
     conn: Connection,

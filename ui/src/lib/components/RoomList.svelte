@@ -43,9 +43,14 @@
           const room = await roomStore.createRoom(newRoomName, $userStore.currentUser.id);
           console.log('Room created:', room);
 
-          // Start streaming for the new room
-          await networkStore.startStreaming(room.id);
-          console.log('Streaming started for new room');
+          // Try to start streaming for the new room, but don't fail if it doesn't work
+          try {
+              await networkStore.startStreaming(room.id);
+              console.log('Streaming started for new room');
+          } catch (streamErr) {
+              // Don't fail room creation if streaming fails
+              console.warn('Audio streaming could not be started, but room was created successfully:', streamErr);
+          }
 
           // Clear input after success
           newRoomName = '';
@@ -66,9 +71,15 @@
           await roomStore.joinRoom(roomId, $userStore.currentUser.id);
           console.log('Successfully joined room');
 
-          console.log('Starting streaming for joined room');
-          await networkStore.startStreaming(roomId);
-          console.log('Streaming started');
+          // Try to start streaming, but don't fail room joining if it doesn't work
+          try {
+              console.log('Starting streaming for joined room');
+              await networkStore.startStreaming(roomId);
+              console.log('Streaming started');
+          } catch (streamErr) {
+              console.warn('Audio streaming could not be started, but room was joined successfully:', streamErr);
+              // Don't show an alert for streaming errors
+          }
       } catch (err) {
           console.error('Failed to join room:', err);
           alert(err instanceof Error ? err.message : 'Failed to join room');
