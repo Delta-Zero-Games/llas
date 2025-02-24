@@ -4,20 +4,14 @@
     "description": "Capability for the LLAS main window",
     "windows": ["main"],
     "permissions": [
-      "core:default",
-      "window:default",
-      "event:default",
-      "event:allow-listen",
-      "event:allow-emit",
-      "app:default",
-      "app:allow-version",
-      "resources:default",
-      "fs:default",
-      "fs:read-all",
-      "fs:write-all",
-      "dialog:allow-save",
-      "dialog:allow-open",
-      "media:allow-audio"
+      "core:all",
+      "window:all",
+      "event:all",
+      "app:all",
+      "resources:all",
+      "fs:all",
+      "dialog:all",
+      "media:all"
     ],
     "capabilities": []
 }

@@ -76,6 +76,16 @@ impl AppState {
             message: message.to_string(),
         });
     }
+    
+    pub fn clone(&self) -> Self {
+        Self {
+            room_manager: self.room_manager.clone(),
+            audio_processor: self.audio_processor.clone(),
+            network: self.network.clone(),
+            state_manager: self.state_manager.clone(),
+            app_handle: self.app_handle.clone(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -133,6 +143,13 @@ async fn create_room(
 async fn cleanup_rooms(state: State<'_, AppState>) -> Result<(), String> {
     let mut state_mgr = state.state_manager.lock().await;
     state_mgr.cleanup_stale_rooms().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clean_all_rooms(state: State<'_, AppState>) -> Result<(), String> {
+    let mut state_mgr = state.state_manager.lock().await;
+    state_mgr.clean_all_rooms().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -445,6 +462,19 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle();
             let app_state = tauri::async_runtime::block_on(AppState::new(app_handle.clone()));
+            
+            // Clean all rooms on startup then run normal cleanup
+            let app_state_clone = app_state.clone();
+            std::thread::spawn(move || {
+                tauri::async_runtime::block_on(async move {
+                    println!("Cleaning all rooms on startup...");
+                    if let Err(e) = app_state_clone.state_manager.lock().await.clean_all_rooms().await {
+                        eprintln!("Failed to clean all rooms: {}", e);
+                    }
+                    println!("Room cleanup completed");
+                });
+            });
+            
             app.manage(app_state);
             Ok(())
         })
@@ -460,7 +490,8 @@ fn main() {
             set_input_device,
             set_input_volume,
             set_muted,
-            cleanup_rooms
+            cleanup_rooms,
+            clean_all_rooms
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

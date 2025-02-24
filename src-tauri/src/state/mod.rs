@@ -5,6 +5,7 @@ use serde_json;
 use crate::room::{Room, User};
 use uuid::Uuid;
 use crate::config::RedisConfig;
+use chrono::{DateTime, Utc, Duration};
 
 pub struct StateManager {
     conn: Connection,
@@ -29,7 +30,7 @@ impl StateManager {
             .set(&room_key, room_json)
             .sadd("rooms", room.id.to_string());
     
-        pipe.query_async::<_, ()>(&mut self.conn).await?;  // Added explicit type
+        pipe.query_async::<_, ()>(&mut self.conn).await?;
         Ok(())
     }
 
@@ -73,22 +74,65 @@ impl StateManager {
             .del(&room_key)
             .srem("rooms", room_id.to_string());
     
-        pipe.query_async::<_, ()>(&mut self.conn).await?;  // Added explicit type
+        pipe.query_async::<_, ()>(&mut self.conn).await?;
+        Ok(())
+    }
+
+    /// Clean up all rooms in Redis.
+    pub async fn clean_all_rooms(&mut self) -> Result<(), RedisError> {
+        let room_ids: Vec<String> = self.conn.smembers("rooms").await?;
+        println!("Cleaning all {} rooms from Redis", room_ids.len());
+        
+        // Create a transaction to delete everything in one go
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        
+        // Add delete commands for each room
+        for id in &room_ids {
+            let room_key = format!("room:{}", id);
+            pipe.del(&room_key);
+            println!("Queueing delete for room {}", id);
+        }
+        
+        // Finally delete the rooms set itself if there are rooms
+        if !room_ids.is_empty() {
+            pipe.del("rooms");
+        }
+        
+        // Execute all commands in a single transaction
+        pipe.query_async::<_, ()>(&mut self.conn).await?;
+        println!("Successfully deleted all {} rooms", room_ids.len());
+        
         Ok(())
     }
 
     pub async fn cleanup_stale_rooms(&mut self) -> Result<(), RedisError> {
         let room_ids: Vec<String> = self.conn.smembers("rooms").await?;
+        let stale_threshold = Utc::now() - Duration::hours(24);
+        
+        println!("Checking {} rooms for cleanup", room_ids.len());
+        let mut deleted_count = 0;
         
         for id in room_ids {
             if let Ok(Some(room)) = self.get_room(&Uuid::parse_str(&id).unwrap()).await {
-                // Delete rooms that are empty or have stale test participants
-                if room.participants.is_empty() || room.name == "Test Room" {
-                    println!("Cleaning up stale room: {} ({})", room.name, id);
+                // Delete rooms that are:
+                // 1. Empty 
+                // 2. Have test names
+                // 3. Are older than 24 hours
+                if room.participants.is_empty() || 
+                   room.name.to_lowercase().contains("test") ||
+                   room.created_at < stale_threshold {
+                    
+                    println!("Cleaning up stale room: {} ({}) - created: {}", 
+                             room.name, id, room.created_at);
+                    
                     self.delete_room(&Uuid::parse_str(&id).unwrap()).await?;
+                    deleted_count += 1;
                 }
             }
         }
+        
+        println!("Cleanup complete: removed {} stale rooms", deleted_count);
         Ok(())
     }
 
